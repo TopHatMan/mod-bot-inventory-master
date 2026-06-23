@@ -1,0 +1,29 @@
+#
+# Bot Inventory Master
+#
+
+# Enable the module.
+# Default: 1
+BotInventoryMaster.Enable = 1
+
+# Require the target bot/alt to be on the same account as the manager.
+# Account-linking is table-ready but commands are not enabled yet.
+# Default: 1
+BotInventoryMaster.RequireSameAccount = 1
+
+# Allow GM accounts to bypass account ownership checks.
+# Default: 1
+BotInventoryMaster.GMBypass = 1
+
+# Require the target to be a bot session.
+# Leave 0 for now because playerbot session reporting can vary between forks/modules.
+# Default: 0
+BotInventoryMaster.RequireTargetIsBot = 0
+
+# Enable reagent deposit from managed bots into this module's virtual account bank.
+# Default: 1
+BotInventoryMaster.DepositReagents.Enable = 1
+
+# Limit rows shown by .botinv bank.
+# Default: 80
+BotInventoryMaster.MaxBankListRows = 80
