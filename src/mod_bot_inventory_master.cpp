@@ -28,6 +28,7 @@
 #include "Item.h"
 #include "ItemTemplate.h"
 #include "Log.h"
+#include "Map.h"
 #include "ObjectGuid.h"
 #include "ObjectMgr.h"
 #include "Player.h"
@@ -61,6 +62,8 @@ namespace BotInventoryMaster
     static bool g_depositEnabled = true;
     static bool g_storageReady = false;
     static uint32 g_maxBankListRows = 80;
+    static float g_requiredTradeDistance = 12.0f;
+    static std::map<ObjectGuid::LowType, ObjectGuid> g_selectedVendorByManager;
 
     static constexpr uint32 MAX_STORED_AMOUNT = std::numeric_limits<uint32>::max();
 
@@ -239,6 +242,12 @@ namespace BotInventoryMaster
         g_requireTargetIsBot = sConfigMgr->GetOption<bool>("BotInventoryMaster.RequireTargetIsBot", false);
         g_depositEnabled = sConfigMgr->GetOption<bool>("BotInventoryMaster.DepositReagents.Enable", true);
         g_maxBankListRows = sConfigMgr->GetOption<uint32>("BotInventoryMaster.MaxBankListRows", 80);
+        g_requiredTradeDistance = sConfigMgr->GetOption<float>("BotInventoryMaster.RequiredTradeDistance", 12.0f);
+
+        if (g_requiredTradeDistance < 1.0f)
+            g_requiredTradeDistance = 1.0f;
+        if (g_requiredTradeDistance > 50.0f)
+            g_requiredTradeDistance = 50.0f;
 
         if (g_maxBankListRows == 0)
             g_maxBankListRows = 80;
@@ -704,6 +713,264 @@ namespace BotInventoryMaster
         return true;
     }
 
+    static bool IsTradeDistanceOk(Player* a, WorldObject* b)
+    {
+        return a && b && a->IsInWorld() && b->IsInWorld() && a->IsWithinDistInMap(b, g_requiredTradeDistance);
+    }
+
+    static bool HandleVendorSet(ChatHandler* handler, Player* manager)
+    {
+        if (!handler || !manager)
+            return false;
+
+        Unit* selected = manager->GetSelectedUnit();
+        Creature* vendor = selected ? selected->ToCreature() : nullptr;
+        if (!vendor || !vendor->IsAlive())
+        {
+            SendError(handler, "Target a living vendor NPC first.");
+            return true;
+        }
+
+        if (!vendor->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
+        {
+            SendError(handler, "Target is not a vendor.");
+            return true;
+        }
+
+        if (!IsTradeDistanceOk(manager, vendor))
+        {
+            SendError(handler, "You are too far from that vendor.");
+            return true;
+        }
+
+        g_selectedVendorByManager[manager->GetGUID().GetCounter()] = vendor->GetGUID();
+        SendOk(handler, Acore::StringFormat("Selected vendor {} for bot selling.", Sanitize(vendor->GetName())));
+        SendProtocol(handler, Acore::StringFormat("BOTINV:VENDOR:SET:{}:{}", uint32(vendor->GetEntry()), Sanitize(vendor->GetName())));
+        return true;
+    }
+
+    static Creature* GetSelectedVendor(ChatHandler* handler, Player* manager, std::string& reason)
+    {
+        reason.clear();
+
+        if (!manager || !manager->GetMap())
+        {
+            reason = "Manager is not on a valid map.";
+            return nullptr;
+        }
+
+        auto itr = g_selectedVendorByManager.find(manager->GetGUID().GetCounter());
+        if (itr == g_selectedVendorByManager.end() || itr->second.IsEmpty())
+        {
+            reason = "No vendor selected. Target a vendor and use .botinv vendor set first.";
+            return nullptr;
+        }
+
+        Creature* vendor = manager->GetMap()->GetCreature(itr->second);
+        if (!vendor || !vendor->IsAlive())
+        {
+            reason = "Selected vendor is no longer available.";
+            return nullptr;
+        }
+
+        if (!vendor->HasNpcFlag(UNIT_NPC_FLAG_VENDOR))
+        {
+            reason = "Selected creature is no longer a vendor.";
+            return nullptr;
+        }
+
+        if (!IsTradeDistanceOk(manager, vendor))
+        {
+            reason = "You are too far from the selected vendor.";
+            return nullptr;
+        }
+
+        return vendor;
+    }
+
+    static uint32 SellGrayFromSlot(Player* source, uint8 bagSlot, uint8 itemSlot, uint64& copper, uint32& stacksSold)
+    {
+        if (!source)
+            return 0;
+
+        Item* item = source->GetItemByPos(bagSlot, itemSlot);
+        if (!item)
+            return 0;
+
+        ItemTemplate const* proto = item->GetTemplate();
+        if (!proto || proto->Quality != ITEM_QUALITY_POOR)
+            return 0;
+
+        uint32 const count = item->GetCount();
+        if (!count)
+            return 0;
+
+        copper += uint64(proto->SellPrice) * uint64(count);
+        ++stacksSold;
+        source->DestroyItem(bagSlot, itemSlot, true);
+        return count;
+    }
+
+    static bool HandleSellGrayTarget(ChatHandler* handler, Player* manager, bool confirm)
+    {
+        Player* target = GetSelectedPlayerBot(handler, manager);
+        if (!target)
+        {
+            SendError(handler, "Target an online playerbot/alt first.");
+            return true;
+        }
+
+        std::string reason;
+        if (!CanManageTarget(manager, target, reason))
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        if (!confirm)
+        {
+            SendError(handler, "Sell gray requires confirm.");
+            return true;
+        }
+
+        Creature* vendor = GetSelectedVendor(handler, manager, reason);
+        if (!vendor)
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        if (!IsTradeDistanceOk(target, vendor))
+        {
+            SendError(handler, Acore::StringFormat("{} is too far from the selected vendor.", Sanitize(target->GetName())));
+            return true;
+        }
+
+        uint64 copper = 0;
+        uint32 stacksSold = 0;
+        uint32 itemsSold = 0;
+
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            itemsSold += SellGrayFromSlot(target, INVENTORY_SLOT_BAG_0, slot, copper, stacksSold);
+
+        for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
+        {
+            Bag* bag = target->GetBagByPos(bagSlot);
+            if (!bag)
+                continue;
+
+            for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+                itemsSold += SellGrayFromSlot(target, bagSlot, uint8(slot), copper, stacksSold);
+        }
+
+        if (copper > 0)
+        {
+            int64 money = target->GetMoney();
+            uint64 capped = std::min<uint64>(copper, uint64(std::numeric_limits<int32>::max()));
+            target->ModifyMoney(int32(capped));
+        }
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:SELL:GRAY:{}:{}:{}:{}", Sanitize(target->GetName()), itemsSold, stacksSold, copper));
+        SendOk(handler, Acore::StringFormat("{} sold {} gray item(s) in {} stack(s) to {} for {} copper.",
+            Sanitize(target->GetName()), itemsSold, stacksSold, Sanitize(vendor->GetName()), copper));
+
+        SendBags(handler, manager, target);
+        return true;
+    }
+
+    static bool IsTakeProtected(Item* item, std::string& reason)
+    {
+        reason.clear();
+
+        if (!item || !item->GetTemplate())
+        {
+            reason = "No valid item.";
+            return true;
+        }
+
+        ItemTemplate const* proto = item->GetTemplate();
+
+        if (proto->Class == ITEM_CLASS_QUEST)
+        {
+            reason = "Quest items are protected.";
+            return true;
+        }
+
+        if (proto->Class == ITEM_CLASS_CONTAINER)
+        {
+            reason = "Bags/containers are protected from take in this safety pass.";
+            return true;
+        }
+
+        if (item->IsSoulBound())
+        {
+            reason = "Soulbound items cannot be traded/taken.";
+            return true;
+        }
+
+        return false;
+    }
+
+    static bool HandleTakeTarget(ChatHandler* handler, Player* manager, uint8 bagSlot, uint8 itemSlot)
+    {
+        Player* target = GetSelectedPlayerBot(handler, manager);
+        if (!target)
+        {
+            SendError(handler, "Target an online playerbot/alt first.");
+            return true;
+        }
+
+        std::string reason;
+        if (!CanManageTarget(manager, target, reason))
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        if (!IsTradeDistanceOk(manager, target))
+        {
+            SendError(handler, "You are too far from the bot to receive that item.");
+            return true;
+        }
+
+        Item* item = target->GetItemByPos(bagSlot, itemSlot);
+        if (!item)
+        {
+            SendError(handler, "No item found in that bot bag slot.");
+            return true;
+        }
+
+        if (IsTakeProtected(item, reason))
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        ItemTemplate const* proto = item->GetTemplate();
+        uint32 const entry = item->GetEntry();
+        uint32 const count = item->GetCount();
+
+        ItemPosCountVec dest;
+        InventoryResult msg = manager->CanStoreItem(NULL_BAG, NULL_SLOT, dest, item, false);
+        if (msg != EQUIP_ERR_OK)
+        {
+            manager->SendEquipError(msg, item, nullptr);
+            SendError(handler, "Your bags do not have room for that item.");
+            return true;
+        }
+
+        target->RemoveItem(bagSlot, itemSlot, true);
+        Item* stored = manager->StoreItem(dest, item, true);
+        if (stored)
+            manager->SendNewItem(stored, count, true, false);
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:TAKE:{}:{}:{}:{}", Sanitize(target->GetName()), entry, count, proto ? Sanitize(proto->Name1) : ""));
+        SendOk(handler, Acore::StringFormat("{} gave you {} x{}.", Sanitize(target->GetName()), entry, count));
+
+        SendBags(handler, manager, target);
+        return true;
+    }
+
     static void SaveAccountBankItems(uint32 ownerAccount, std::map<uint32, std::pair<uint32, uint32>> const& changed)
     {
         if (!ownerAccount || changed.empty())
@@ -959,13 +1226,16 @@ namespace BotInventoryMaster
 
     static void SendUsage(ChatHandler* handler)
     {
-        SendProtocol(handler, "BOTINV:USAGE:.botinv bots | target bags | target equipment | target equip <bag> <slot> | target unequip <equipSlot> | target destroy <bag> <slot> confirm | target deposit reagents | party deposit reagents | bank");
+        SendProtocol(handler, "BOTINV:USAGE:.botinv bots | vendor set | target bags | target equipment | target equip <bag> <slot> | target unequip <equipSlot> | target take <bag> <slot> | target sell gray confirm | target destroy <bag> <slot> confirm | target deposit reagents | party deposit reagents | bank");
         handler->SendSysMessage("BotInventoryMaster commands:");
         handler->SendSysMessage(".botinv bots");
+        handler->SendSysMessage(".botinv vendor set");
         handler->SendSysMessage(".botinv target bags");
         handler->SendSysMessage(".botinv target equipment");
         handler->SendSysMessage(".botinv target equip <bag> <slot>");
         handler->SendSysMessage(".botinv target unequip <equipSlot>");
+        handler->SendSysMessage(".botinv target take <bag> <slot>");
+        handler->SendSysMessage(".botinv target sell gray confirm");
         handler->SendSysMessage(".botinv target destroy <bag> <slot> confirm");
         handler->SendSysMessage(".botinv target deposit reagents");
         handler->SendSysMessage(".botinv party deposit reagents");
@@ -1025,6 +1295,15 @@ private:
         if (command == "bank")
         {
             BotInventoryMaster::SendBank(handler, manager);
+            return true;
+        }
+
+        if (command == "vendor")
+        {
+            if (tokens.size() >= 2 && BotInventoryMaster::ToLower(tokens[1]) == "set")
+                return BotInventoryMaster::HandleVendorSet(handler, manager);
+
+            BotInventoryMaster::SendUsage(handler);
             return true;
         }
 
@@ -1095,6 +1374,28 @@ private:
 
                 bool confirm = BotInventoryMaster::ToLower(tokens[4]) == "confirm";
                 return BotInventoryMaster::HandleDestroyTarget(handler, manager, uint8(bag), uint8(slot), confirm);
+            }
+
+            if (tokens.size() >= 4 && BotInventoryMaster::ToLower(tokens[1]) == "take")
+            {
+                uint32 bag = 0;
+                uint32 slot = 0;
+                if (!BotInventoryMaster::TryParseUInt32(tokens[2], bag) || !BotInventoryMaster::TryParseUInt32(tokens[3], slot) ||
+                    bag > std::numeric_limits<uint8>::max() || slot > std::numeric_limits<uint8>::max())
+                {
+                    BotInventoryMaster::SendError(handler, "Usage: .botinv target take <bag> <slot>");
+                    return true;
+                }
+
+                return BotInventoryMaster::HandleTakeTarget(handler, manager, uint8(bag), uint8(slot));
+            }
+
+            if (tokens.size() >= 4 &&
+                BotInventoryMaster::ToLower(tokens[1]) == "sell" &&
+                BotInventoryMaster::ToLower(tokens[2]) == "gray")
+            {
+                bool confirm = BotInventoryMaster::ToLower(tokens[3]) == "confirm";
+                return BotInventoryMaster::HandleSellGrayTarget(handler, manager, confirm);
             }
 
             if (tokens.size() >= 3 &&

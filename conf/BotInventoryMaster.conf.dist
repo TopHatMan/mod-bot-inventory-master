@@ -27,3 +27,8 @@ BotInventoryMaster.DepositReagents.Enable = 1
 # Limit rows shown by .botinv bank.
 # Default: 80
 BotInventoryMaster.MaxBankListRows = 80
+
+# Required distance between manager/bot/vendor for trade-like actions.
+# Used by take and vendor sell commands.
+# Default: 12
+BotInventoryMaster.RequiredTradeDistance = 12

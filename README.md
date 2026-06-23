@@ -2,7 +2,7 @@
 
 AzerothCore module prototype for controlling inventory of online playerbot/alt characters.
 
-## Phase 2
+## Phase 3
 
 This first version is intentionally server-command-first. The addon UI can be built on top of the emitted `BOTINV:*` protocol lines later.
 
@@ -15,6 +15,9 @@ Commands:
 .botinv target equipment
 .botinv target equip <bag> <slot>
 .botinv target unequip <equipSlot>
+.botinv target take <bag> <slot>
+.botinv vendor set
+.botinv target sell gray confirm
 .botinv target destroy <bag> <slot> confirm
 .botinv target deposit reagents
 .botinv party deposit reagents
@@ -65,6 +68,9 @@ Target an online bot/alt on your account:
 .botinv target equipment
 .botinv target equip <bag> <slot>
 .botinv target unequip <equipSlot>
+.botinv target take <bag> <slot>
+.botinv vendor set
+.botinv target sell gray confirm
 .botinv target destroy <bag> <slot> confirm
 .botinv target deposit reagents
 .botinv bank
@@ -88,8 +94,20 @@ With group bots:
 - addon UI
 
 
-## Phase 2 notes
+## Phase 3 notes
 
 - Equip uses normal server validation. If replacing an occupied slot fails, unequip the old slot first.
 - Destroy is intentionally locked to gray-quality non-quest, non-container bag items.
 - Equipment and bag records are sent as `BOTINV:EQUIP:*` and `BOTINV:BAG:*` for the addon UI.
+
+## Phase 3 notes
+
+No-cheat vendor selling:
+- Target a real vendor NPC first and run `.botinv vendor set`.
+- Target your bot/alt and run `.botinv target sell gray confirm`.
+- The manager and bot must both be within configured trade/vendor distance of that vendor.
+- Gray item sell copper is added to the bot, not magically to the manager.
+
+Trade-like taking:
+- `.botinv target take <bag> <slot>` moves a non-soulbound, non-quest, non-container bag item from the bot to your character.
+- You must be near the bot and have bag space.
