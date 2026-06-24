@@ -7,10 +7,16 @@
  *   belong to the same account, without touching other accounts unless an
  *   explicit account-linking system is added later.
  *
- * Phase 1 commands:
+ * Current commands:
  *   .botinv
  *   .botinv bots
  *   .botinv target bags
+ *   .botinv target equipment
+ *   .botinv target sell gray confirm
+ *   .botinv target sell <bag> <slot> confirm
+ *   .botinv target buyback list
+ *   .botinv target buyback <id>
+ *   .botinv target equipbag <bag> <slot>
  *   .botinv target deposit reagents
  *   .botinv party deposit reagents
  *   .botinv bank
@@ -30,6 +36,7 @@
 #include "Log.h"
 #include "Map.h"
 #include "ObjectGuid.h"
+#include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "ScriptMgr.h"
@@ -63,9 +70,27 @@ namespace BotInventoryMaster
     static bool g_storageReady = false;
     static uint32 g_maxBankListRows = 80;
     static float g_requiredTradeDistance = 12.0f;
+    static bool g_allowSellSelected = true;
+    static bool g_allowBuyback = true;
+    static uint32 g_buybackMaxRecordsPerBot = 12;
+
     static std::map<ObjectGuid::LowType, ObjectGuid> g_selectedVendorByManager;
+    static std::map<ObjectGuid::LowType, ObjectGuid> g_selectedBotByManager;
 
     static constexpr uint32 MAX_STORED_AMOUNT = std::numeric_limits<uint32>::max();
+
+    struct BuybackRecord
+    {
+        uint32 Id = 0;
+        uint32 Entry = 0;
+        uint32 Count = 0;
+        uint32 Quality = 0;
+        uint64 Cost = 0;
+        std::string Name;
+    };
+
+    static uint32 g_nextBuybackId = 1;
+    static std::map<ObjectGuid::LowType, std::vector<BuybackRecord>> g_buybackByBot;
 
     struct CategoryInfo
     {
@@ -96,6 +121,15 @@ namespace BotInventoryMaster
     } };
 
     using ItemAmountMap = std::map<uint32, uint32>;
+
+    struct CleanupStats
+    {
+        uint32 Items = 0;
+        uint32 Stacks = 0;
+        uint32 FailedStacks = 0;
+        uint64 Copper = 0;
+    };
+
 
     static std::string Sanitize(std::string text)
     {
@@ -241,8 +275,16 @@ namespace BotInventoryMaster
         g_gmBypass = sConfigMgr->GetOption<bool>("BotInventoryMaster.GMBypass", true);
         g_requireTargetIsBot = sConfigMgr->GetOption<bool>("BotInventoryMaster.RequireTargetIsBot", false);
         g_depositEnabled = sConfigMgr->GetOption<bool>("BotInventoryMaster.DepositReagents.Enable", true);
+        g_allowSellSelected = sConfigMgr->GetOption<bool>("BotInventoryMaster.Vendor.AllowSellSelected", true);
+        g_allowBuyback = sConfigMgr->GetOption<bool>("BotInventoryMaster.Vendor.AllowBuyback", true);
+        g_buybackMaxRecordsPerBot = sConfigMgr->GetOption<uint32>("BotInventoryMaster.Vendor.BuybackMaxRecordsPerBot", 12);
         g_maxBankListRows = sConfigMgr->GetOption<uint32>("BotInventoryMaster.MaxBankListRows", 80);
         g_requiredTradeDistance = sConfigMgr->GetOption<float>("BotInventoryMaster.RequiredTradeDistance", 12.0f);
+
+        if (g_buybackMaxRecordsPerBot < 1)
+            g_buybackMaxRecordsPerBot = 1;
+        if (g_buybackMaxRecordsPerBot > 40)
+            g_buybackMaxRecordsPerBot = 40;
 
         if (g_requiredTradeDistance < 1.0f)
             g_requiredTradeDistance = 1.0f;
@@ -368,16 +410,50 @@ namespace BotInventoryMaster
         return false;
     }
 
+    static void RememberSelectedBot(Player* manager, Player* target)
+    {
+        if (!manager || !target)
+            return;
+
+        g_selectedBotByManager[manager->GetGUID().GetCounter()] = target->GetGUID();
+    }
+
+    static Player* GetRememberedBot(Player* manager)
+    {
+        if (!manager)
+            return nullptr;
+
+        auto itr = g_selectedBotByManager.find(manager->GetGUID().GetCounter());
+        if (itr == g_selectedBotByManager.end() || itr->second.IsEmpty())
+            return nullptr;
+
+        Player* remembered = ObjectAccessor::FindPlayer(itr->second);
+        if (!remembered || !remembered->IsInWorld())
+            return nullptr;
+
+        return remembered;
+    }
+
     static Player* GetSelectedPlayerBot(ChatHandler* handler, Player* manager)
     {
         if (!handler || !manager)
             return nullptr;
 
         Unit* selected = manager->GetSelectedUnit();
-        if (!selected)
-            return nullptr;
+        if (selected)
+        {
+            if (Player* selectedPlayer = selected->ToPlayer())
+            {
+                RememberSelectedBot(manager, selectedPlayer);
+                return selectedPlayer;
+            }
+        }
 
-        return selected->ToPlayer();
+        // Important UI behavior:
+        // After the addon scans a bot, it remembers that bot server-side.
+        // That lets the player target a vendor, run .botinv vendor set, then still
+        // sell/refresh the remembered bot without retargeting it.
+        return GetRememberedBot(manager);
     }
 
     static uint32 CountFreeBagSlots(Player* player)
@@ -445,6 +521,129 @@ namespace BotInventoryMaster
             uint32(proto->Quality),
             proto->SellPrice,
             Sanitize(proto->Name1)));
+    }
+
+    static void AddBuybackRecord(Player* target, uint32 entry, uint32 count, uint32 quality, uint64 cost, std::string const& name)
+    {
+        if (!target || !entry || !count || !cost || !g_allowBuyback)
+            return;
+
+        BuybackRecord record;
+        record.Id = g_nextBuybackId++;
+        if (!g_nextBuybackId)
+            g_nextBuybackId = 1;
+
+        record.Entry = entry;
+        record.Count = count;
+        record.Quality = quality;
+        record.Cost = cost;
+        record.Name = Sanitize(name);
+
+        std::vector<BuybackRecord>& records = g_buybackByBot[target->GetGUID().GetCounter()];
+        records.push_back(record);
+
+        while (records.size() > g_buybackMaxRecordsPerBot)
+            records.erase(records.begin());
+    }
+
+    static BuybackRecord* FindBuybackRecord(Player* target, uint32 buybackId)
+    {
+        if (!target || !buybackId)
+            return nullptr;
+
+        auto itr = g_buybackByBot.find(target->GetGUID().GetCounter());
+        if (itr == g_buybackByBot.end())
+            return nullptr;
+
+        for (BuybackRecord& record : itr->second)
+            if (record.Id == buybackId)
+                return &record;
+
+        return nullptr;
+    }
+
+    static void RemoveBuybackRecord(Player* target, uint32 buybackId)
+    {
+        if (!target || !buybackId)
+            return;
+
+        auto itr = g_buybackByBot.find(target->GetGUID().GetCounter());
+        if (itr == g_buybackByBot.end())
+            return;
+
+        std::vector<BuybackRecord>& records = itr->second;
+        records.erase(std::remove_if(records.begin(), records.end(), [buybackId](BuybackRecord const& r)
+        {
+            return r.Id == buybackId;
+        }), records.end());
+    }
+
+    static void SendBuybackList(ChatHandler* handler, Player* manager, Player* target)
+    {
+        if (!handler || !manager || !target)
+            return;
+
+        std::string reason;
+        if (!CanManageTarget(manager, target, reason))
+        {
+            SendError(handler, reason);
+            return;
+        }
+
+        RememberSelectedBot(manager, target);
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:BUYBACK:BEGIN:{}:{}", Sanitize(target->GetName()), target->GetMoney()));
+
+        auto itr = g_buybackByBot.find(target->GetGUID().GetCounter());
+        if (itr != g_buybackByBot.end())
+        {
+            for (BuybackRecord const& record : itr->second)
+            {
+                SendProtocol(handler, Acore::StringFormat("BOTINV:BUYBACK:ITEM:{}:{}:{}:{}:{}:{}:{}",
+                    Sanitize(target->GetName()),
+                    record.Id,
+                    record.Entry,
+                    record.Count,
+                    record.Quality,
+                    record.Cost,
+                    Sanitize(record.Name)));
+            }
+        }
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:BUYBACK:END:{}", Sanitize(target->GetName())));
+    }
+
+    static bool IsSellProtected(Item* item, std::string& reason)
+    {
+        reason.clear();
+
+        if (!item || !item->GetTemplate())
+        {
+            reason = "No valid item.";
+            return true;
+        }
+
+        ItemTemplate const* proto = item->GetTemplate();
+
+        if (proto->Class == ITEM_CLASS_QUEST)
+        {
+            reason = "Quest items are protected from vendor selling.";
+            return true;
+        }
+
+        if (proto->Class == ITEM_CLASS_CONTAINER)
+        {
+            reason = "Bags/containers are protected from vendor selling. Use Equip Bag instead.";
+            return true;
+        }
+
+        if (!proto->SellPrice)
+        {
+            reason = "That item has no vendor sell price.";
+            return true;
+        }
+
+        return false;
     }
 
     static bool IsDestroyProtected(ItemTemplate const* proto, std::string& reason)
@@ -536,7 +735,9 @@ namespace BotInventoryMaster
             return;
         }
 
-        SendProtocol(handler, Acore::StringFormat("BOTINV:BAG:BEGIN:{}:{}", Sanitize(target->GetName()), CountFreeBagSlots(target)));
+        RememberSelectedBot(manager, target);
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:BAG:BEGIN:{}:{}:{}", Sanitize(target->GetName()), CountFreeBagSlots(target), target->GetMoney()));
 
         for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
             SendBagItem(handler, target, INVENTORY_SLOT_BAG_0, slot);
@@ -554,6 +755,51 @@ namespace BotInventoryMaster
         SendProtocol(handler, Acore::StringFormat("BOTINV:BAG:END:{}", Sanitize(target->GetName())));
     }
 
+    static void FindItemOnTarget(ChatHandler* handler, Player* manager, Player* target, uint32 itemEntry)
+    {
+        if (!handler || !manager || !target || !itemEntry)
+            return;
+
+        std::string reason;
+        if (!CanManageTarget(manager, target, reason))
+        {
+            SendError(handler, reason);
+            return;
+        }
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:FIND:BEGIN:{}:{}", Sanitize(target->GetName()), itemEntry));
+
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        {
+            Item* item = target->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+            if (item && item->GetEntry() == itemEntry)
+                SendProtocol(handler, Acore::StringFormat("BOTINV:FIND:ITEM:{}:equip:{}:0:{}:{}", Sanitize(target->GetName()), uint32(slot), itemEntry, item->GetCount()));
+        }
+
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        {
+            Item* item = target->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+            if (item && item->GetEntry() == itemEntry)
+                SendProtocol(handler, Acore::StringFormat("BOTINV:FIND:ITEM:{}:bag:{}:{}:{}:{}", Sanitize(target->GetName()), uint32(INVENTORY_SLOT_BAG_0), uint32(slot), itemEntry, item->GetCount()));
+        }
+
+        for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
+        {
+            Bag* bag = target->GetBagByPos(bagSlot);
+            if (!bag)
+                continue;
+
+            for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+            {
+                Item* item = bag->GetItemByPos(uint8(slot));
+                if (item && item->GetEntry() == itemEntry)
+                    SendProtocol(handler, Acore::StringFormat("BOTINV:FIND:ITEM:{}:bag:{}:{}:{}:{}", Sanitize(target->GetName()), uint32(bagSlot), slot, itemEntry, item->GetCount()));
+            }
+        }
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:FIND:END:{}:{}", Sanitize(target->GetName()), itemEntry));
+    }
+
     static void SendEquipment(ChatHandler* handler, Player* manager, Player* target)
     {
         if (!handler || !manager || !target)
@@ -566,7 +812,9 @@ namespace BotInventoryMaster
             return;
         }
 
-        SendProtocol(handler, Acore::StringFormat("BOTINV:EQUIP:BEGIN:{}", Sanitize(target->GetName())));
+        RememberSelectedBot(manager, target);
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:EQUIP:BEGIN:{}:{}", Sanitize(target->GetName()), target->GetMoney()));
 
         for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
         {
@@ -603,22 +851,84 @@ namespace BotInventoryMaster
             return true;
         }
 
+        uint32 const entry = item->GetEntry();
+        uint32 const count = item->GetCount();
+
         uint16 dest = 0;
         InventoryResult msg = target->CanEquipItem(NULL_SLOT, dest, item, true);
         if (msg != EQUIP_ERR_OK)
         {
             target->SendEquipError(msg, item, nullptr);
-            SendError(handler, "The bot cannot equip that item. Try unequipping the occupied slot first if needed.");
+            SendError(handler, "The bot cannot equip that item. The item was not moved.");
             return true;
         }
 
+        // Loss-safe equip: remove only after validation, then verify EquipItem returns an equipped item.
+        // If it fails unexpectedly, roll the original Item* back into the bot's bags instead of dropping it.
         target->RemoveItem(bagSlot, itemSlot, true);
-        target->EquipItem(dest, item, true);
+        Item* equipped = target->EquipItem(dest, item, true);
+        if (!equipped)
+        {
+            ItemPosCountVec rollbackDest;
+            InventoryResult storeMsg = target->CanStoreItem(bagSlot, itemSlot, rollbackDest, item, false);
+            if (storeMsg != EQUIP_ERR_OK)
+                storeMsg = target->CanStoreItem(NULL_BAG, NULL_SLOT, rollbackDest, item, false);
 
-        SendOk(handler, Acore::StringFormat("{} equipped item {}.", Sanitize(target->GetName()), item->GetEntry()));
+            if (storeMsg == EQUIP_ERR_OK)
+            {
+                target->StoreItem(rollbackDest, item, true);
+                SendError(handler, Acore::StringFormat("Equip failed unexpectedly; item {} x{} was returned to {}'s bags.", entry, count, Sanitize(target->GetName())));
+            }
+            else
+            {
+                LOG_ERROR("module", "BotInventoryMaster: CRITICAL rollback failed while equipping item {} x{} for {} from bag {} slot {}.",
+                    entry, count, target->GetGUID().ToString(), uint32(bagSlot), uint32(itemSlot));
+                SendError(handler, Acore::StringFormat("CRITICAL: equip failed and rollback failed for item {}. Stop and check character_inventory/item_instance before continuing.", entry));
+            }
+
+            SendEquipment(handler, manager, target);
+            SendBags(handler, manager, target);
+            return true;
+        }
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:EQUIP:OK:{}:{}:{}", Sanitize(target->GetName()), entry, count));
+        SendOk(handler, Acore::StringFormat("{} equipped item {} x{}.", Sanitize(target->GetName()), entry, count));
         SendEquipment(handler, manager, target);
         SendBags(handler, manager, target);
         return true;
+    }
+
+    static bool HandleEquipBagTarget(ChatHandler* handler, Player* manager, uint8 bagSlot, uint8 itemSlot)
+    {
+        Player* target = GetSelectedPlayerBot(handler, manager);
+        if (!target)
+        {
+            SendError(handler, "Target or scan an online playerbot/alt first.");
+            return true;
+        }
+
+        std::string reason;
+        if (!CanManageTarget(manager, target, reason))
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        Item* item = target->GetItemByPos(bagSlot, itemSlot);
+        if (!item || !item->GetTemplate())
+        {
+            SendError(handler, "No valid item found in that bot bag slot.");
+            return true;
+        }
+
+        ItemTemplate const* proto = item->GetTemplate();
+        if (proto->Class != ITEM_CLASS_CONTAINER)
+        {
+            SendError(handler, "Selected item is not a bag/container.");
+            return true;
+        }
+
+        return HandleEquipTarget(handler, manager, bagSlot, itemSlot);
     }
 
     static bool HandleUnequipTarget(ChatHandler* handler, Player* manager, uint8 equipSlot)
@@ -659,10 +969,23 @@ namespace BotInventoryMaster
             return true;
         }
 
-        target->RemoveItem(INVENTORY_SLOT_BAG_0, equipSlot, true);
-        target->StoreItem(dest, item, true);
+        uint32 const entry = item->GetEntry();
+        uint32 const count = item->GetCount();
 
-        SendOk(handler, Acore::StringFormat("{} unequipped item {}.", Sanitize(target->GetName()), item->GetEntry()));
+        target->RemoveItem(INVENTORY_SLOT_BAG_0, equipSlot, true);
+        Item* stored = target->StoreItem(dest, item, true);
+        if (!stored)
+        {
+            // Roll back to the same equipment slot. This should be rare because CanStoreItem already passed.
+            target->EquipItem(equipSlot, item, true);
+            SendError(handler, Acore::StringFormat("Unequip failed unexpectedly; item {} x{} was returned to equipment slot {}.", entry, count, uint32(equipSlot)));
+            SendEquipment(handler, manager, target);
+            SendBags(handler, manager, target);
+            return true;
+        }
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:UNEQUIP:OK:{}:{}:{}", Sanitize(target->GetName()), entry, count));
+        SendOk(handler, Acore::StringFormat("{} unequipped item {} x{}.", Sanitize(target->GetName()), entry, count));
         SendEquipment(handler, manager, target);
         SendBags(handler, manager, target);
         return true;
@@ -744,7 +1067,13 @@ namespace BotInventoryMaster
         }
 
         g_selectedVendorByManager[manager->GetGUID().GetCounter()] = vendor->GetGUID();
-        SendOk(handler, Acore::StringFormat("Selected vendor {} for bot selling.", Sanitize(vendor->GetName())));
+        Player* rememberedBot = GetRememberedBot(manager);
+
+        if (rememberedBot)
+            SendOk(handler, Acore::StringFormat("Selected vendor {} for remembered bot {}.", Sanitize(vendor->GetName()), Sanitize(rememberedBot->GetName())));
+        else
+            SendOk(handler, Acore::StringFormat("Selected vendor {}. Scan a bot's bags next, then sell.", Sanitize(vendor->GetName())));
+
         SendProtocol(handler, Acore::StringFormat("BOTINV:VENDOR:SET:{}:{}", uint32(vendor->GetEntry()), Sanitize(vendor->GetName())));
         return true;
     }
@@ -788,7 +1117,7 @@ namespace BotInventoryMaster
         return vendor;
     }
 
-    static uint32 SellGrayFromSlot(Player* source, uint8 bagSlot, uint8 itemSlot, uint64& copper, uint32& stacksSold)
+    static uint32 SellGrayFromSlot(Player* source, uint8 bagSlot, uint8 itemSlot, uint64& copper, uint32& stacksSold, uint32& failedStacks)
     {
         if (!source)
             return 0;
@@ -801,13 +1130,60 @@ namespace BotInventoryMaster
         if (!proto || proto->Quality != ITEM_QUALITY_POOR)
             return 0;
 
+        uint32 const entry = item->GetEntry();
+        uint32 const count = item->GetCount();
+        uint32 const sellPrice = proto->SellPrice;
+        if (!count)
+            return 0;
+
+        source->DestroyItem(bagSlot, itemSlot, true);
+
+        // Verify the slot no longer contains the same item stack before adding money.
+        Item* after = source->GetItemByPos(bagSlot, itemSlot);
+        if (after && after->GetEntry() == entry)
+        {
+            ++failedStacks;
+            LOG_ERROR("module", "BotInventoryMaster: failed to sell/destroy gray item {} x{} from {} bag {} slot {}; item still present.",
+                entry, count, source->GetGUID().ToString(), uint32(bagSlot), uint32(itemSlot));
+            return 0;
+        }
+
+        copper += uint64(sellPrice) * uint64(count);
+        ++stacksSold;
+        return count;
+    }
+
+    static uint32 DestroyGrayFromSlot(Player* source, uint8 bagSlot, uint8 itemSlot, uint32& stacksDestroyed, uint32& failedStacks)
+    {
+        if (!source)
+            return 0;
+
+        Item* item = source->GetItemByPos(bagSlot, itemSlot);
+        if (!item)
+            return 0;
+
+        ItemTemplate const* proto = item->GetTemplate();
+        if (!proto || proto->Quality != ITEM_QUALITY_POOR)
+            return 0;
+
+        uint32 const entry = item->GetEntry();
         uint32 const count = item->GetCount();
         if (!count)
             return 0;
 
-        copper += uint64(proto->SellPrice) * uint64(count);
-        ++stacksSold;
         source->DestroyItem(bagSlot, itemSlot, true);
+
+        // Verify removal. This is the important anti-"said it destroyed but did not" check.
+        Item* after = source->GetItemByPos(bagSlot, itemSlot);
+        if (after && after->GetEntry() == entry)
+        {
+            ++failedStacks;
+            LOG_ERROR("module", "BotInventoryMaster: failed to destroy gray item {} x{} from {} bag {} slot {}; item still present.",
+                entry, count, source->GetGUID().ToString(), uint32(bagSlot), uint32(itemSlot));
+            return 0;
+        }
+
+        ++stacksDestroyed;
         return count;
     }
 
@@ -848,10 +1224,11 @@ namespace BotInventoryMaster
 
         uint64 copper = 0;
         uint32 stacksSold = 0;
+        uint32 failedStacks = 0;
         uint32 itemsSold = 0;
 
         for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
-            itemsSold += SellGrayFromSlot(target, INVENTORY_SLOT_BAG_0, slot, copper, stacksSold);
+            itemsSold += SellGrayFromSlot(target, INVENTORY_SLOT_BAG_0, slot, copper, stacksSold, failedStacks);
 
         for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
         {
@@ -860,21 +1237,301 @@ namespace BotInventoryMaster
                 continue;
 
             for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
-                itemsSold += SellGrayFromSlot(target, bagSlot, uint8(slot), copper, stacksSold);
+                itemsSold += SellGrayFromSlot(target, bagSlot, uint8(slot), copper, stacksSold, failedStacks);
         }
 
         if (copper > 0)
         {
-            int64 money = target->GetMoney();
             uint64 capped = std::min<uint64>(copper, uint64(std::numeric_limits<int32>::max()));
             target->ModifyMoney(int32(capped));
         }
 
-        SendProtocol(handler, Acore::StringFormat("BOTINV:SELL:GRAY:{}:{}:{}:{}", Sanitize(target->GetName()), itemsSold, stacksSold, copper));
-        SendOk(handler, Acore::StringFormat("{} sold {} gray item(s) in {} stack(s) to {} for {} copper.",
-            Sanitize(target->GetName()), itemsSold, stacksSold, Sanitize(vendor->GetName()), copper));
+        SendProtocol(handler, Acore::StringFormat("BOTINV:SELL:GRAY:{}:{}:{}:{}:{}", Sanitize(target->GetName()), itemsSold, stacksSold, failedStacks, copper));
+
+        if (failedStacks)
+            SendError(handler, Acore::StringFormat("{} sold {} gray item(s), but {} stack(s) failed verification. Refresh bags and inspect before continuing.",
+                Sanitize(target->GetName()), itemsSold, failedStacks));
+        else
+            SendOk(handler, Acore::StringFormat("{} sold {} gray item(s) in {} stack(s) to {} for {} copper.",
+                Sanitize(target->GetName()), itemsSold, stacksSold, Sanitize(vendor->GetName()), copper));
 
         SendBags(handler, manager, target);
+        return true;
+    }
+
+
+    static bool HandleSellItemTarget(ChatHandler* handler, Player* manager, uint8 bagSlot, uint8 itemSlot, bool confirm)
+    {
+        if (!g_allowSellSelected)
+        {
+            SendError(handler, "Selected item selling is disabled in config.");
+            return true;
+        }
+
+        Player* target = GetSelectedPlayerBot(handler, manager);
+        if (!target)
+        {
+            SendError(handler, "Target or scan an online playerbot/alt first.");
+            return true;
+        }
+
+        std::string reason;
+        if (!CanManageTarget(manager, target, reason))
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        if (!confirm)
+        {
+            SendError(handler, "Selling a selected item requires confirm.");
+            return true;
+        }
+
+        Creature* vendor = GetSelectedVendor(handler, manager, reason);
+        if (!vendor)
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        if (!IsTradeDistanceOk(target, vendor))
+        {
+            SendError(handler, Acore::StringFormat("{} is too far from the selected vendor.", Sanitize(target->GetName())));
+            return true;
+        }
+
+        Item* item = target->GetItemByPos(bagSlot, itemSlot);
+        if (!item)
+        {
+            SendError(handler, "No item found in that bot bag slot.");
+            return true;
+        }
+
+        if (IsSellProtected(item, reason))
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        ItemTemplate const* proto = item->GetTemplate();
+        uint32 const entry = item->GetEntry();
+        uint32 const count = item->GetCount();
+        uint32 const quality = proto ? uint32(proto->Quality) : 0;
+        uint64 const copper = proto ? (uint64(proto->SellPrice) * uint64(count)) : 0;
+        std::string const name = proto ? Sanitize(proto->Name1) : "";
+
+        if (!count || !copper)
+        {
+            SendError(handler, "Item count or vendor value was zero.");
+            return true;
+        }
+
+        target->DestroyItem(bagSlot, itemSlot, true);
+
+        Item* after = target->GetItemByPos(bagSlot, itemSlot);
+        if (after && after->GetEntry() == entry)
+        {
+            SendError(handler, "Sell failed verification; item still appears in that slot.");
+            SendBags(handler, manager, target);
+            return true;
+        }
+
+        uint64 capped = std::min<uint64>(copper, uint64(std::numeric_limits<int32>::max()));
+        target->ModifyMoney(int32(capped));
+
+        AddBuybackRecord(target, entry, count, quality, capped, name);
+
+        uint32 buybackId = 0;
+        auto itr = g_buybackByBot.find(target->GetGUID().GetCounter());
+        if (itr != g_buybackByBot.end() && !itr->second.empty())
+            buybackId = itr->second.back().Id;
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:SELL:ITEM:{}:{}:{}:{}:{}:{}:{}",
+            Sanitize(target->GetName()), buybackId, entry, count, quality, capped, name));
+
+        SendOk(handler, Acore::StringFormat("{} sold {} x{} to {} for {} copper. Buyback id: {}.",
+            Sanitize(target->GetName()), entry, count, Sanitize(vendor->GetName()), capped, buybackId));
+
+        SendBags(handler, manager, target);
+        SendBuybackList(handler, manager, target);
+        return true;
+    }
+
+    static bool HandleBuybackTarget(ChatHandler* handler, Player* manager, uint32 buybackId)
+    {
+        if (!g_allowBuyback)
+        {
+            SendError(handler, "Module buyback is disabled in config.");
+            return true;
+        }
+
+        Player* target = GetSelectedPlayerBot(handler, manager);
+        if (!target)
+        {
+            SendError(handler, "Target or scan an online playerbot/alt first.");
+            return true;
+        }
+
+        std::string reason;
+        if (!CanManageTarget(manager, target, reason))
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        BuybackRecord* record = FindBuybackRecord(target, buybackId);
+        if (!record)
+        {
+            SendError(handler, "Buyback record not found for that bot.");
+            SendBuybackList(handler, manager, target);
+            return true;
+        }
+
+        if (record->Cost > uint64(std::numeric_limits<int32>::max()))
+        {
+            SendError(handler, "Buyback cost is too large for this safety implementation.");
+            return true;
+        }
+
+        if (target->GetMoney() < record->Cost)
+        {
+            SendError(handler, Acore::StringFormat("{} does not have enough money to buy back item {}.", Sanitize(target->GetName()), record->Entry));
+            return true;
+        }
+
+        if (!target->AddItem(record->Entry, record->Count))
+        {
+            SendError(handler, Acore::StringFormat("{} has no room to buy back item {} x{}.", Sanitize(target->GetName()), record->Entry, record->Count));
+            SendBags(handler, manager, target);
+            return true;
+        }
+
+        target->ModifyMoney(-int32(record->Cost));
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:BUYBACK:OK:{}:{}:{}:{}:{}",
+            Sanitize(target->GetName()), record->Id, record->Entry, record->Count, record->Cost));
+
+        SendOk(handler, Acore::StringFormat("{} bought back {} x{} for {} copper.",
+            Sanitize(target->GetName()), record->Entry, record->Count, record->Cost));
+
+        RemoveBuybackRecord(target, buybackId);
+
+        SendBags(handler, manager, target);
+        SendBuybackList(handler, manager, target);
+        return true;
+    }
+
+    static CleanupStats DestroyGrayFromPlayer(Player* target)
+    {
+        CleanupStats stats;
+
+        if (!target)
+            return stats;
+
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            stats.Items += DestroyGrayFromSlot(target, INVENTORY_SLOT_BAG_0, slot, stats.Stacks, stats.FailedStacks);
+
+        for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
+        {
+            Bag* bag = target->GetBagByPos(bagSlot);
+            if (!bag)
+                continue;
+
+            for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+                stats.Items += DestroyGrayFromSlot(target, bagSlot, uint8(slot), stats.Stacks, stats.FailedStacks);
+        }
+
+        return stats;
+    }
+
+    static bool HandleDestroyGrayTarget(ChatHandler* handler, Player* manager, bool confirm)
+    {
+        Player* target = GetSelectedPlayerBot(handler, manager);
+        if (!target)
+        {
+            SendError(handler, "Target an online playerbot/alt first.");
+            return true;
+        }
+
+        std::string reason;
+        if (!CanManageTarget(manager, target, reason))
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        if (!confirm)
+        {
+            SendError(handler, "Destroy gray requires confirm.");
+            return true;
+        }
+
+        CleanupStats stats = DestroyGrayFromPlayer(target);
+        SendProtocol(handler, Acore::StringFormat("BOTINV:DESTROY:GRAY:{}:{}:{}", Sanitize(target->GetName()), stats.Items, stats.Stacks));
+
+        if (stats.FailedStacks)
+            SendError(handler, Acore::StringFormat("{} destroyed {} gray item(s), but {} stack(s) failed verification. Refresh bags and inspect.",
+                Sanitize(target->GetName()), stats.Items, stats.FailedStacks));
+        else
+            SendOk(handler, Acore::StringFormat("{} destroyed {} gray item(s) in {} stack(s).",
+                Sanitize(target->GetName()), stats.Items, stats.Stacks));
+
+        SendBags(handler, manager, target);
+        return true;
+    }
+
+    static bool HandleDestroyGrayParty(ChatHandler* handler, Player* manager, bool confirm)
+    {
+        if (!handler || !manager)
+            return false;
+
+        if (!confirm)
+        {
+            SendError(handler, "Party destroy gray requires confirm.");
+            return true;
+        }
+
+        Group* group = manager->GetGroup();
+        if (!group)
+        {
+            SendError(handler, "You are not in a group.");
+            return true;
+        }
+
+        uint32 totalItems = 0;
+        uint32 totalStacks = 0;
+        uint32 totalFailed = 0;
+        uint32 botCount = 0;
+
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->GetSource();
+            if (!member || member == manager)
+                continue;
+
+            std::string reason;
+            if (!CanManageTarget(manager, member, reason))
+                continue;
+
+            CleanupStats stats = DestroyGrayFromPlayer(member);
+            if (stats.Items || stats.Stacks || stats.FailedStacks)
+            {
+                ++botCount;
+                totalItems += stats.Items;
+                totalStacks += stats.Stacks;
+                totalFailed += stats.FailedStacks;
+                SendProtocol(handler, Acore::StringFormat("BOTINV:DESTROY:GRAY:{}:{}:{}", Sanitize(member->GetName()), stats.Items, stats.Stacks));
+            }
+        }
+
+        if (totalFailed)
+            SendError(handler, Acore::StringFormat("Party gray cleanup destroyed {} item(s) in {} stack(s), but {} stack(s) failed verification.",
+                totalItems, totalStacks, totalFailed));
+        else
+            SendOk(handler, Acore::StringFormat("Party gray cleanup destroyed {} item(s) in {} stack(s) from {} manageable bot(s).",
+                totalItems, totalStacks, botCount));
+
         return true;
     }
 
@@ -961,8 +1618,24 @@ namespace BotInventoryMaster
 
         target->RemoveItem(bagSlot, itemSlot, true);
         Item* stored = manager->StoreItem(dest, item, true);
-        if (stored)
-            manager->SendNewItem(stored, count, true, false);
+        if (!stored)
+        {
+            ItemPosCountVec rollbackDest;
+            InventoryResult backMsg = target->CanStoreItem(bagSlot, itemSlot, rollbackDest, item, false);
+            if (backMsg != EQUIP_ERR_OK)
+                backMsg = target->CanStoreItem(NULL_BAG, NULL_SLOT, rollbackDest, item, false);
+
+            if (backMsg == EQUIP_ERR_OK)
+                target->StoreItem(rollbackDest, item, true);
+            else
+                LOG_ERROR("module", "BotInventoryMaster: CRITICAL take rollback failed for item {} x{} from {}.", entry, count, target->GetGUID().ToString());
+
+            SendError(handler, "Take failed unexpectedly; item rollback was attempted. Refresh bags and verify.");
+            SendBags(handler, manager, target);
+            return true;
+        }
+
+        manager->SendNewItem(stored, count, true, false);
 
         SendProtocol(handler, Acore::StringFormat("BOTINV:TAKE:{}:{}:{}:{}", Sanitize(target->GetName()), entry, count, proto ? Sanitize(proto->Name1) : ""));
         SendOk(handler, Acore::StringFormat("{} gave you {} x{}.", Sanitize(target->GetName()), entry, count));
@@ -1226,16 +1899,24 @@ namespace BotInventoryMaster
 
     static void SendUsage(ChatHandler* handler)
     {
-        SendProtocol(handler, "BOTINV:USAGE:.botinv bots | vendor set | target bags | target equipment | target equip <bag> <slot> | target unequip <equipSlot> | target take <bag> <slot> | target sell gray confirm | target destroy <bag> <slot> confirm | target deposit reagents | party deposit reagents | bank");
+        SendProtocol(handler, "BOTINV:USAGE:.botinv bots | vendor set | target bags | target equipment | target equip <bag> <slot> | target equipbag <bag> <slot> | target unequip <equipSlot> | target take <bag> <slot> | target find <itemEntry> | target sell gray confirm | target sell <bag> <slot> confirm | target buyback list | target buyback <id> | target destroy gray confirm | target destroy <bag> <slot> confirm | party destroy gray confirm | target deposit reagents | party deposit reagents | bank");
         handler->SendSysMessage("BotInventoryMaster commands:");
         handler->SendSysMessage(".botinv bots");
         handler->SendSysMessage(".botinv vendor set");
+        handler->SendSysMessage("Note: scanning target bags remembers that bot, so vendor actions can work while a vendor is targeted.");
         handler->SendSysMessage(".botinv target bags");
         handler->SendSysMessage(".botinv target equipment");
         handler->SendSysMessage(".botinv target equip <bag> <slot>");
+        handler->SendSysMessage(".botinv target equipbag <bag> <slot>");
         handler->SendSysMessage(".botinv target unequip <equipSlot>");
         handler->SendSysMessage(".botinv target take <bag> <slot>");
+        handler->SendSysMessage(".botinv target find <itemEntry>");
         handler->SendSysMessage(".botinv target sell gray confirm");
+        handler->SendSysMessage(".botinv target sell <bag> <slot> confirm");
+        handler->SendSysMessage(".botinv target buyback list");
+        handler->SendSysMessage(".botinv target buyback <id>");
+        handler->SendSysMessage(".botinv target destroy gray confirm");
+        handler->SendSysMessage(".botinv party destroy gray confirm");
         handler->SendSysMessage(".botinv target destroy <bag> <slot> confirm");
         handler->SendSysMessage(".botinv target deposit reagents");
         handler->SendSysMessage(".botinv party deposit reagents");
@@ -1349,6 +2030,20 @@ private:
                 return BotInventoryMaster::HandleEquipTarget(handler, manager, uint8(bag), uint8(slot));
             }
 
+            if (tokens.size() >= 4 && BotInventoryMaster::ToLower(tokens[1]) == "equipbag")
+            {
+                uint32 bag = 0;
+                uint32 slot = 0;
+                if (!BotInventoryMaster::TryParseUInt32(tokens[2], bag) || !BotInventoryMaster::TryParseUInt32(tokens[3], slot) ||
+                    bag > std::numeric_limits<uint8>::max() || slot > std::numeric_limits<uint8>::max())
+                {
+                    BotInventoryMaster::SendError(handler, "Usage: .botinv target equipbag <bag> <slot>");
+                    return true;
+                }
+
+                return BotInventoryMaster::HandleEquipBagTarget(handler, manager, uint8(bag), uint8(slot));
+            }
+
             if (tokens.size() >= 3 && BotInventoryMaster::ToLower(tokens[1]) == "unequip")
             {
                 uint32 equipSlot = 0;
@@ -1359,6 +2054,14 @@ private:
                 }
 
                 return BotInventoryMaster::HandleUnequipTarget(handler, manager, uint8(equipSlot));
+            }
+
+            if (tokens.size() >= 4 &&
+                BotInventoryMaster::ToLower(tokens[1]) == "destroy" &&
+                BotInventoryMaster::ToLower(tokens[2]) == "gray")
+            {
+                bool confirm = BotInventoryMaster::ToLower(tokens[3]) == "confirm";
+                return BotInventoryMaster::HandleDestroyGrayTarget(handler, manager, confirm);
             }
 
             if (tokens.size() >= 5 && BotInventoryMaster::ToLower(tokens[1]) == "destroy")
@@ -1374,6 +2077,26 @@ private:
 
                 bool confirm = BotInventoryMaster::ToLower(tokens[4]) == "confirm";
                 return BotInventoryMaster::HandleDestroyTarget(handler, manager, uint8(bag), uint8(slot), confirm);
+            }
+
+            if (tokens.size() >= 3 && BotInventoryMaster::ToLower(tokens[1]) == "find")
+            {
+                uint32 itemEntry = 0;
+                if (!BotInventoryMaster::TryParseUInt32(tokens[2], itemEntry) || !itemEntry)
+                {
+                    BotInventoryMaster::SendError(handler, "Usage: .botinv target find <itemEntry>");
+                    return true;
+                }
+
+                Player* target = BotInventoryMaster::GetSelectedPlayerBot(handler, manager);
+                if (!target)
+                {
+                    BotInventoryMaster::SendError(handler, "Target an online playerbot/alt first.");
+                    return true;
+                }
+
+                BotInventoryMaster::FindItemOnTarget(handler, manager, target, itemEntry);
+                return true;
             }
 
             if (tokens.size() >= 4 && BotInventoryMaster::ToLower(tokens[1]) == "take")
@@ -1398,6 +2121,46 @@ private:
                 return BotInventoryMaster::HandleSellGrayTarget(handler, manager, confirm);
             }
 
+            if (tokens.size() >= 5 && BotInventoryMaster::ToLower(tokens[1]) == "sell")
+            {
+                uint32 bag = 0;
+                uint32 slot = 0;
+                if (!BotInventoryMaster::TryParseUInt32(tokens[2], bag) || !BotInventoryMaster::TryParseUInt32(tokens[3], slot) ||
+                    bag > std::numeric_limits<uint8>::max() || slot > std::numeric_limits<uint8>::max())
+                {
+                    BotInventoryMaster::SendError(handler, "Usage: .botinv target sell <bag> <slot> confirm");
+                    return true;
+                }
+
+                bool confirm = BotInventoryMaster::ToLower(tokens[4]) == "confirm";
+                return BotInventoryMaster::HandleSellItemTarget(handler, manager, uint8(bag), uint8(slot), confirm);
+            }
+
+            if (tokens.size() >= 3 && BotInventoryMaster::ToLower(tokens[1]) == "buyback")
+            {
+                if (BotInventoryMaster::ToLower(tokens[2]) == "list")
+                {
+                    Player* target = BotInventoryMaster::GetSelectedPlayerBot(handler, manager);
+                    if (!target)
+                    {
+                        BotInventoryMaster::SendError(handler, "Target or scan an online playerbot/alt first.");
+                        return true;
+                    }
+
+                    BotInventoryMaster::SendBuybackList(handler, manager, target);
+                    return true;
+                }
+
+                uint32 buybackId = 0;
+                if (!BotInventoryMaster::TryParseUInt32(tokens[2], buybackId) || !buybackId)
+                {
+                    BotInventoryMaster::SendError(handler, "Usage: .botinv target buyback <id>");
+                    return true;
+                }
+
+                return BotInventoryMaster::HandleBuybackTarget(handler, manager, buybackId);
+            }
+
             if (tokens.size() >= 3 &&
                 BotInventoryMaster::ToLower(tokens[1]) == "deposit" &&
                 BotInventoryMaster::ToLower(tokens[2]) == "reagents")
@@ -1417,6 +2180,14 @@ private:
 
         if (command == "party")
         {
+            if (tokens.size() >= 4 &&
+                BotInventoryMaster::ToLower(tokens[1]) == "destroy" &&
+                BotInventoryMaster::ToLower(tokens[2]) == "gray")
+            {
+                bool confirm = BotInventoryMaster::ToLower(tokens[3]) == "confirm";
+                return BotInventoryMaster::HandleDestroyGrayParty(handler, manager, confirm);
+            }
+
             if (tokens.size() >= 3 &&
                 BotInventoryMaster::ToLower(tokens[1]) == "deposit" &&
                 BotInventoryMaster::ToLower(tokens[2]) == "reagents")

@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: Bot Inventory Master UI
+## Notes: Bag grid, equipment, vendor sell, and take-item controls for mod-bot-inventory-master.
+## Author: Nick + ChatGPT
+## Version: 0.7
+## SavedVariables: BotInventoryMasterDB
+
+BotInventoryMasterUI.lua

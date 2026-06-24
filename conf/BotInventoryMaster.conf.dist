@@ -32,3 +32,17 @@ BotInventoryMaster.MaxBankListRows = 80
 # Used by take and vendor sell commands.
 # Default: 12
 BotInventoryMaster.RequiredTradeDistance = 12
+
+
+#
+# Vendor safety additions
+#
+
+# Allows selling one selected non-gray item to the selected vendor with confirm.
+# Quest items, bags/containers, and no-sell-price items remain blocked.
+BotInventoryMaster.Vendor.AllowSellSelected = 1
+
+# In-memory module buyback for items sold through BotInventoryMaster.
+# This restores entry/count only; enchants/gems/random properties are not preserved.
+BotInventoryMaster.Vendor.AllowBuyback = 1
+BotInventoryMaster.Vendor.BuybackMaxRecordsPerBot = 12
