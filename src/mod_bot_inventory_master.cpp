@@ -13,10 +13,11 @@
  *   .botinv target bags
  *   .botinv target equipment
  *   .botinv target sell gray confirm
- *   .botinv target sell <bag> <slot> confirm
+ *   .botinv target sell <bag> <slot> [confirm]
  *   .botinv target buyback list
  *   .botinv target buyback <id>
  *   .botinv target equipbag <bag> <slot>
+ *   .botinv target destroy <bag> <slot> [confirm]
  *   .botinv target deposit reagents
  *   .botinv party deposit reagents
  *   .botinv bank
@@ -73,6 +74,12 @@ namespace BotInventoryMaster
     static bool g_allowSellSelected = true;
     static bool g_allowBuyback = true;
     static uint32 g_buybackMaxRecordsPerBot = 12;
+
+    // Danger mode is intentionally permissive because this is a single-player/bot
+    // management tool. The addon can send actions directly with no warning popups.
+    static bool g_dangerAllowAnySell = true;
+    static bool g_dangerAllowAnyDestroy = true;
+    static bool g_dangerRequireConfirm = false;
 
     static std::map<ObjectGuid::LowType, ObjectGuid> g_selectedVendorByManager;
     static std::map<ObjectGuid::LowType, ObjectGuid> g_selectedBotByManager;
@@ -278,6 +285,11 @@ namespace BotInventoryMaster
         g_allowSellSelected = sConfigMgr->GetOption<bool>("BotInventoryMaster.Vendor.AllowSellSelected", true);
         g_allowBuyback = sConfigMgr->GetOption<bool>("BotInventoryMaster.Vendor.AllowBuyback", true);
         g_buybackMaxRecordsPerBot = sConfigMgr->GetOption<uint32>("BotInventoryMaster.Vendor.BuybackMaxRecordsPerBot", 12);
+
+        g_dangerAllowAnySell = sConfigMgr->GetOption<bool>("BotInventoryMaster.Danger.AllowAnySell", true);
+        g_dangerAllowAnyDestroy = sConfigMgr->GetOption<bool>("BotInventoryMaster.Danger.AllowAnyDestroy", true);
+        g_dangerRequireConfirm = sConfigMgr->GetOption<bool>("BotInventoryMaster.Danger.RequireConfirm", false);
+
         g_maxBankListRows = sConfigMgr->GetOption<uint32>("BotInventoryMaster.MaxBankListRows", 80);
         g_requiredTradeDistance = sConfigMgr->GetOption<float>("BotInventoryMaster.RequiredTradeDistance", 12.0f);
 
@@ -525,7 +537,7 @@ namespace BotInventoryMaster
 
     static void AddBuybackRecord(Player* target, uint32 entry, uint32 count, uint32 quality, uint64 cost, std::string const& name)
     {
-        if (!target || !entry || !count || !cost || !g_allowBuyback)
+        if (!target || !entry || !count || !g_allowBuyback)
             return;
 
         BuybackRecord record;
@@ -625,6 +637,9 @@ namespace BotInventoryMaster
 
         ItemTemplate const* proto = item->GetTemplate();
 
+        if (g_dangerAllowAnySell)
+            return false;
+
         if (proto->Class == ITEM_CLASS_QUEST)
         {
             reason = "Quest items are protected from vendor selling.";
@@ -655,6 +670,9 @@ namespace BotInventoryMaster
             reason = "Missing item template.";
             return true;
         }
+
+        if (g_dangerAllowAnyDestroy)
+            return false;
 
         if (proto->Class == ITEM_CLASS_QUEST)
         {
@@ -1007,7 +1025,7 @@ namespace BotInventoryMaster
             return true;
         }
 
-        if (!confirm)
+        if (!confirm && g_dangerRequireConfirm)
         {
             SendError(handler, "Destroy requires confirm.");
             return true;
@@ -1282,7 +1300,7 @@ namespace BotInventoryMaster
             return true;
         }
 
-        if (!confirm)
+        if (!confirm && g_dangerRequireConfirm)
         {
             SendError(handler, "Selling a selected item requires confirm.");
             return true;
@@ -1321,9 +1339,9 @@ namespace BotInventoryMaster
         uint64 const copper = proto ? (uint64(proto->SellPrice) * uint64(count)) : 0;
         std::string const name = proto ? Sanitize(proto->Name1) : "";
 
-        if (!count || !copper)
+        if (!count)
         {
-            SendError(handler, "Item count or vendor value was zero.");
+            SendError(handler, "Item count was zero.");
             return true;
         }
 
@@ -1546,6 +1564,9 @@ namespace BotInventoryMaster
         }
 
         ItemTemplate const* proto = item->GetTemplate();
+
+        if (g_dangerAllowAnySell)
+            return false;
 
         if (proto->Class == ITEM_CLASS_QUEST)
         {
@@ -1899,7 +1920,7 @@ namespace BotInventoryMaster
 
     static void SendUsage(ChatHandler* handler)
     {
-        SendProtocol(handler, "BOTINV:USAGE:.botinv bots | vendor set | target bags | target equipment | target equip <bag> <slot> | target equipbag <bag> <slot> | target unequip <equipSlot> | target take <bag> <slot> | target find <itemEntry> | target sell gray confirm | target sell <bag> <slot> confirm | target buyback list | target buyback <id> | target destroy gray confirm | target destroy <bag> <slot> confirm | party destroy gray confirm | target deposit reagents | party deposit reagents | bank");
+        SendProtocol(handler, "BOTINV:USAGE:.botinv bots | vendor set | target bags | target equipment | target equip <bag> <slot> | target equipbag <bag> <slot> | target unequip <equipSlot> | target take <bag> <slot> | target find <itemEntry> | target sell gray confirm | target sell <bag> <slot> [confirm] | target buyback list | target buyback <id> | target destroy gray confirm | target destroy <bag> <slot> [confirm] | party destroy gray confirm | target deposit reagents | party deposit reagents | bank");
         handler->SendSysMessage("BotInventoryMaster commands:");
         handler->SendSysMessage(".botinv bots");
         handler->SendSysMessage(".botinv vendor set");
@@ -1912,12 +1933,12 @@ namespace BotInventoryMaster
         handler->SendSysMessage(".botinv target take <bag> <slot>");
         handler->SendSysMessage(".botinv target find <itemEntry>");
         handler->SendSysMessage(".botinv target sell gray confirm");
-        handler->SendSysMessage(".botinv target sell <bag> <slot> confirm");
+        handler->SendSysMessage(".botinv target sell <bag> <slot> [confirm]");
         handler->SendSysMessage(".botinv target buyback list");
         handler->SendSysMessage(".botinv target buyback <id>");
         handler->SendSysMessage(".botinv target destroy gray confirm");
         handler->SendSysMessage(".botinv party destroy gray confirm");
-        handler->SendSysMessage(".botinv target destroy <bag> <slot> confirm");
+        handler->SendSysMessage(".botinv target destroy <bag> <slot> [confirm]");
         handler->SendSysMessage(".botinv target deposit reagents");
         handler->SendSysMessage(".botinv party deposit reagents");
         handler->SendSysMessage(".botinv bank");
@@ -2064,18 +2085,18 @@ private:
                 return BotInventoryMaster::HandleDestroyGrayTarget(handler, manager, confirm);
             }
 
-            if (tokens.size() >= 5 && BotInventoryMaster::ToLower(tokens[1]) == "destroy")
+            if (tokens.size() >= 4 && BotInventoryMaster::ToLower(tokens[1]) == "destroy")
             {
                 uint32 bag = 0;
                 uint32 slot = 0;
                 if (!BotInventoryMaster::TryParseUInt32(tokens[2], bag) || !BotInventoryMaster::TryParseUInt32(tokens[3], slot) ||
                     bag > std::numeric_limits<uint8>::max() || slot > std::numeric_limits<uint8>::max())
                 {
-                    BotInventoryMaster::SendError(handler, "Usage: .botinv target destroy <bag> <slot> confirm");
+                    BotInventoryMaster::SendError(handler, "Usage: .botinv target destroy <bag> <slot> [confirm]");
                     return true;
                 }
 
-                bool confirm = BotInventoryMaster::ToLower(tokens[4]) == "confirm";
+                bool confirm = tokens.size() >= 5 && BotInventoryMaster::ToLower(tokens[4]) == "confirm";
                 return BotInventoryMaster::HandleDestroyTarget(handler, manager, uint8(bag), uint8(slot), confirm);
             }
 
@@ -2121,18 +2142,18 @@ private:
                 return BotInventoryMaster::HandleSellGrayTarget(handler, manager, confirm);
             }
 
-            if (tokens.size() >= 5 && BotInventoryMaster::ToLower(tokens[1]) == "sell")
+            if (tokens.size() >= 4 && BotInventoryMaster::ToLower(tokens[1]) == "sell")
             {
                 uint32 bag = 0;
                 uint32 slot = 0;
                 if (!BotInventoryMaster::TryParseUInt32(tokens[2], bag) || !BotInventoryMaster::TryParseUInt32(tokens[3], slot) ||
                     bag > std::numeric_limits<uint8>::max() || slot > std::numeric_limits<uint8>::max())
                 {
-                    BotInventoryMaster::SendError(handler, "Usage: .botinv target sell <bag> <slot> confirm");
+                    BotInventoryMaster::SendError(handler, "Usage: .botinv target sell <bag> <slot> [confirm]");
                     return true;
                 }
 
-                bool confirm = BotInventoryMaster::ToLower(tokens[4]) == "confirm";
+                bool confirm = tokens.size() >= 5 && BotInventoryMaster::ToLower(tokens[4]) == "confirm";
                 return BotInventoryMaster::HandleSellItemTarget(handler, manager, uint8(bag), uint8(slot), confirm);
             }
 

@@ -1,6 +1,6 @@
-# BotInventoryMasterUI v0.7
+# BotInventoryMasterUI v0.8
 
-Updated for BotInventoryMaster v7 vendor safety.
+No-warning direct item control for BotInventoryMaster v8.
 
 Slash:
 
@@ -9,15 +9,16 @@ Slash:
 /botinvui
 ```
 
-New UI controls:
+Controls:
 
-- `Sell Sel` sells the selected bot bag item to the selected vendor with a warning.
-- `Buybacks` lists module buyback records for the remembered/targeted bot.
-- `Buy Last` buys back the latest listed/sold item.
-- `Equip Bag` attempts to equip the selected bag/container item on the bot.
-- Alt-right-click a bag item opens the sell-selected warning.
+- `Sell Sel`: sells selected bot bag item immediately.
+- `Destroy Sel`: destroys selected bot bag item immediately.
+- `Buybacks`: lists module buyback records.
+- `Buy Last`: buys back the last sold item.
+- `Equip Bag`: attempts to equip selected bag/container item.
+- `Alt-right-click`: sell selected item directly.
+- `Ctrl-right-click`: destroy selected item directly.
+- `Shift-right-click`: take item to player.
+- `Right-click`: equip item.
 
-Safety notes:
-
-- The server blocks quest items, bags/containers from vendor selling, and no-sell-price items.
-- Module buyback restores item entry/count only. It does not preserve enchants, gems, random stats, or unique item instance data.
+Danger mode is intentional. No popup warnings.

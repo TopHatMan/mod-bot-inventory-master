@@ -48,7 +48,7 @@ end
 
 local status = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 status:SetPoint("TOPLEFT", 24, -42)
-status:SetText("Target bot. Right-click equip. Shift-right take. Ctrl-right destroy. Alt-right sell selected. Equip Bag for bigger bags.")
+status:SetText("Target bot. Right-click equip. Shift-right take. Ctrl-right destroy ANY. Alt-right sell ANY. No warnings.")
 
 local function MakeButton(parent, text, x, y, w, h, onclick)
     local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
@@ -81,21 +81,24 @@ end)
 MakeButton(f, "Set Vendor", 484, -62, 88, 22, function() SendCmd(".botinv vendor set") end)
 MakeButton(f, "Sell Gray", 576, -62, 82, 22, function() StaticPopup_Show("BOTINV_SELL_GRAY_CONFIRM") end)
 MakeButton(f, "Sell Sel", 662, -62, 75, 22, function()
-    if selectedBag and selectedSlot then StaticPopup_Show("BOTINV_SELL_SELECTED_CONFIRM") end
+    if selectedBag and selectedSlot then SendCmd(".botinv target sell " .. selectedBag .. " " .. selectedSlot) end
 end)
 MakeButton(f, "Bank", 24, -86, 55, 22, function() SendCmd(".botinv bank") end)
-MakeButton(f, "Equip Bag", 83, -86, 82, 22, function()
+MakeButton(f, "Destroy Sel", 83, -86, 90, 22, function()
+    if selectedBag and selectedSlot then SendCmd(".botinv target destroy " .. selectedBag .. " " .. selectedSlot) end
+end)
+MakeButton(f, "Equip Bag", 177, -86, 82, 22, function()
     if selectedBag and selectedSlot then SendCmd(".botinv target equipbag " .. selectedBag .. " " .. selectedSlot) end
 end)
-MakeButton(f, "Buybacks", 169, -86, 78, 22, function() SendCmd(".botinv target buyback list") end)
-MakeButton(f, "Buy Last", 251, -86, 76, 22, function()
+MakeButton(f, "Buybacks", 263, -86, 78, 22, function() SendCmd(".botinv target buyback list") end)
+MakeButton(f, "Buy Last", 345, -86, 76, 22, function()
     if lastBuybackId then SendCmd(".botinv target buyback " .. lastBuybackId) end
 end)
-MakeButton(f, "Deposit", 331, -86, 75, 22, function() SendCmd(".botinv target deposit reagents") end)
-MakeButton(f, "Destroy Gray Bot", 410, -86, 115, 22, function()
+MakeButton(f, "Deposit", 425, -86, 75, 22, function() SendCmd(".botinv target deposit reagents") end)
+MakeButton(f, "Destroy Gray Bot", 504, -86, 115, 22, function()
     StaticPopup_Show("BOTINV_DESTROY_GRAY_TARGET_CONFIRM")
 end)
-MakeButton(f, "Destroy Gray Party", 529, -86, 125, 22, function()
+MakeButton(f, "Destroy Gray Party", 623, -86, 125, 22, function()
     StaticPopup_Show("BOTINV_DESTROY_GRAY_PARTY_CONFIRM")
 end)
 
@@ -152,12 +155,12 @@ StaticPopupDialogs["BOTINV_SELL_GRAY_CONFIRM"] = {
 
 
 StaticPopupDialogs["BOTINV_SELL_SELECTED_CONFIRM"] = {
-    text = "Sell the selected bot item to the selected vendor? Non-gray items are dangerous. Module buyback only restores entry/count, not enchants/gems/random stats.",
+    text = "Sell selected item? v0.8 normally sends this directly; this popup is unused unless called by old code.",
     button1 = "Sell Item",
     button2 = "Cancel",
     OnAccept = function()
         if selectedBag and selectedSlot then
-            SendCmd(".botinv target sell " .. selectedBag .. " " .. selectedSlot .. " confirm")
+            SendCmd(".botinv target sell " .. selectedBag .. " " .. selectedSlot)
         end
     end,
     timeout = 0,
@@ -238,13 +241,9 @@ local function GetBagButton(index)
             if IsShiftKeyDown() then
                 SendCmd(".botinv target take " .. self.bag .. " " .. self.slot)
             elseif IsControlKeyDown() then
-                if self.quality == 0 then
-                    SendCmd(".botinv target destroy " .. self.bag .. " " .. self.slot .. " confirm")
-                else
-                    StaticPopup_Show("BOTINV_DESTROY_CONFIRM")
-                end
+                SendCmd(".botinv target destroy " .. self.bag .. " " .. self.slot)
             elseif IsAltKeyDown() then
-                StaticPopup_Show("BOTINV_SELL_SELECTED_CONFIRM")
+                SendCmd(".botinv target sell " .. self.bag .. " " .. self.slot)
             else
                 SendCmd(".botinv target equip " .. self.bag .. " " .. self.slot)
             end
@@ -260,8 +259,8 @@ local function GetBagButton(index)
             GameTooltip:AddLine("Left-click select", 0.6, 0.9, 1)
             GameTooltip:AddLine("Right-click equip", 0.6, 0.9, 1)
             GameTooltip:AddLine("Shift-right take/trade to you", 0.6, 0.9, 1)
-            GameTooltip:AddLine("Ctrl-right destroy gray / warn destroy non-gray", 0.6, 0.9, 1)
-            GameTooltip:AddLine("Alt-right sell selected to vendor with warning", 1, 0.8, 0.3)
+            GameTooltip:AddLine("Ctrl-right destroy selected item directly", 0.6, 0.9, 1)
+            GameTooltip:AddLine("Alt-right sell selected item directly", 1, 0.8, 0.3)
             GameTooltip:AddLine("Equip Bag button for bigger bags", 0.6, 1, 0.6)
             GameTooltip:AddLine("Bot bag " .. tostring(self.bag) .. " slot " .. tostring(self.slot), 0.6, 0.9, 1)
         end

@@ -46,3 +46,17 @@ BotInventoryMaster.Vendor.AllowSellSelected = 1
 # This restores entry/count only; enchants/gems/random properties are not preserved.
 BotInventoryMaster.Vendor.AllowBuyback = 1
 BotInventoryMaster.Vendor.BuybackMaxRecordsPerBot = 12
+
+
+#
+# Danger mode / no-warning item control
+#
+# Single-player convenience mode. Lets BotInventoryMaster sell/destroy any bag item,
+# including white/green/blue items, bags/containers, and quest items.
+# Use with care: destroying a bag may destroy its contents.
+BotInventoryMaster.Danger.AllowAnySell = 1
+BotInventoryMaster.Danger.AllowAnyDestroy = 1
+
+# If 0, selected sell/destroy commands do not require the literal "confirm" word.
+# The addon still sends direct actions; no popup warnings.
+BotInventoryMaster.Danger.RequireConfirm = 0

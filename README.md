@@ -173,3 +173,26 @@ Equip bag:
 - Only allows container items.
 - Uses the same loss-safe equip path as normal equip.
 - The server's normal inventory checks decide whether the bag can be placed/replaced.
+
+
+## v7 compilefix1
+
+This AzerothCore branch's `Player::AddItem(entry, count)` returns `bool`, not `Item*`.
+The module buyback restore path now checks the boolean result directly.
+
+
+## v8 danger/no-warning item control
+
+This version intentionally allows direct control over cluttered bot bags.
+
+New behavior:
+- `.botinv target sell <bag> <slot>` can sell white/green/blue items and bags.
+- `.botinv target destroy <bag> <slot>` can destroy white/green/blue items and bags.
+- The literal `confirm` word is optional when `BotInventoryMaster.Danger.RequireConfirm = 0`.
+- Buyback records are created even for zero-copper vendor removes.
+
+Danger notes:
+- Quest items can be destroyed/sold if danger mode is enabled.
+- Bags/containers can be destroyed/sold if danger mode is enabled.
+- Destroying or selling a bag may remove the bag and whatever is inside it depending on core behavior.
+- Equipment moving remains loss-safe: equip/unequip still validates and attempts rollback if storage/equip fails.
