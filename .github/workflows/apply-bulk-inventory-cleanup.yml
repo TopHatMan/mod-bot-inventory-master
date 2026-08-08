@@ -1,0 +1,34 @@
+name: Apply bulk inventory cleanup patch
+
+on:
+  push:
+    branches:
+      - agent/bulk-inventory-cleanup
+    paths:
+      - scripts/apply_bulk_inventory_cleanup.py
+      - .github/workflows/apply-bulk-inventory-cleanup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/bulk-inventory-cleanup
+      - name: Apply source/addon patch
+        run: python scripts/apply_bulk_inventory_cleanup.py
+      - name: Commit generated changes
+        shell: bash
+        run: |
+          if git diff --quiet -- src/mod_bot_inventory_master.cpp BotInventoryMasterUI/BotInventoryMasterUI.lua conf/BotInventoryMaster.conf.dist README.md; then
+            echo "No generated changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/mod_bot_inventory_master.cpp BotInventoryMasterUI/BotInventoryMasterUI.lua conf/BotInventoryMaster.conf.dist README.md
+          git commit -m "Add bulk inventory cleanup and quality sorting"
+          git push origin HEAD:agent/bulk-inventory-cleanup
