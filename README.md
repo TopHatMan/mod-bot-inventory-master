@@ -196,3 +196,60 @@ Danger notes:
 - Bags/containers can be destroyed/sold if danger mode is enabled.
 - Destroying or selling a bag may remove the bag and whatever is inside it depending on core behavior.
 - Equipment moving remains loss-safe: equip/unequip still validates and attempts rollback if storage/equip fails.
+
+
+## v9 bulk inventory cleanup UI
+
+This pass targets multi-box/playerbot bag clutter directly.
+
+Addon changes:
+- normal left-click now toggles **multi-selection** instead of forcing one selected item
+- **Sell Checked** and **Delete Checked** send selected stacks in compact batch commands
+- large selections are automatically chunked to stay under the WoW 3.3.5 chat-message limit
+- **Sort: Best / Sort: Trash** changes only the addon view; it never physically rearranges bot bags
+- quick selectors: Gray, White, Green, <= Green, Food, Clear
+- quality marker on each bag icon: J/C/U/R/E
+- `.botinv bots` now creates up to five clickable bot buttons; clicking one uses `.botinv use <name>` so a five-character party can be managed without retargeting every character in the world
+
+Server commands added:
+
+```text
+.botinv use <botName>
+.botinv target sellbatch <bag,slot;bag,slot;...> confirm
+.botinv target destroybatch <bag,slot;bag,slot;...> confirm
+```
+
+Bulk safety is intentionally stricter than the existing v8 single-item Danger mode:
+- quest items are always skipped
+- bags/containers are always skipped
+- Hearthstone and core Shaman totems are always skipped
+- items above `BotInventoryMaster.Bulk.MaxQuality` are always skipped (default: green/uncommon and below)
+- bulk vendor sell skips zero-price items rather than deleting them for zero copper
+- every removed stack is verified before it counts as success
+- bulk sell creates the same module buyback records used by selected-item selling
+
+The existing right-click shortcuts remain single-item actions, so deliberate one-off danger-mode control still works independently of bulk cleanup.
+
+
+### Party Bags: all managed bots in one view
+
+Use the new **Party Bags** button (or `.botinv party bags`) to load the occupied bag stacks from every manageable online bot in your current group into one addon view.
+
+- sorting and Gray/White/Green/Food selectors work across the whole party view
+- selections can span multiple bots
+- **Sell Checked** groups selected stacks by owner and credits each bot's own money
+- **Delete Checked** removes the selected stacks from their actual owners
+- the view is paged at 80 occupied stacks per page, while selection persists across pages
+- each tooltip shows the owning bot
+- direct right-click/equip/take actions are disabled in the aggregate view; click that bot's quick button first for one-character operations
+- party batch commands refresh the combined view only after the final queued chunk, avoiding thousands of redundant protocol lines on large cleanups
+
+Server protocol/commands:
+
+```text
+.botinv party bags
+.botinv party sellbatch <BotName,bag,slot;...> confirm [refresh]
+.botinv party destroybatch <BotName,bag,slot;...> confirm [refresh]
+```
+
+Bulk cleanup also refuses items flagged `ITEM_FLAG_NO_USER_DESTROY`, key/quest bag-family items, and items with a non-zero `TotemCategory` (class/profession tools). `Delete Checked` asks for one confirmation before dispatching the selected batches.

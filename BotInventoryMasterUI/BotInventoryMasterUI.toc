@@ -1,8 +1,8 @@
 ## Interface: 30300
 ## Title: Bot Inventory Master UI
-## Notes: Bag grid, equipment, vendor sell, and take-item controls for mod-bot-inventory-master.
+## Notes: Multi-select, party-wide bag cleanup, quality sorting, vendor sell, equipment, and bot inventory controls.
 ## Author: Nick + ChatGPT
-## Version: 0.8
+## Version: 0.9
 ## SavedVariables: BotInventoryMasterDB
 
 BotInventoryMasterUI.lua
