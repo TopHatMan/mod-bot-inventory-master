@@ -36,6 +36,9 @@ local partyView = false
 local currentPage = 1
 local PAGE_SIZE = 80
 local partyBotCount = 0
+local UpdateSelectionStatus
+local RenderBagGrid
+local pageText
 local lastBotMoneyCopper = 0
 local lastBotFreeSlots = 0
 local lastBotName = nil
@@ -158,7 +161,7 @@ local function SelectionCount()
     return n
 end
 
-local function UpdateSelectionStatus(extra)
+UpdateSelectionStatus = function(extra)
     local selected = SelectionCount()
     local bot = lastBotName or "no bot"
     local base = bot .. " | selected " .. selected .. " | free " .. tostring(lastBotFreeSlots) .. " | " .. FormatMoney(lastBotMoneyCopper)
@@ -248,6 +251,7 @@ destroyCheckedButton:SetScript("OnClick", function() SendSelectedBulk("destroy")
 
 sortButton = MakeButton(f, "Sort: Best", 24, -112, 82, 22, function(self)
     sortMode = sortMode == "best" and "trash" or "best"
+    currentPage = 1
     self:SetText(sortMode == "best" and "Sort: Best" or "Sort: Trash")
     if RenderBagGrid then RenderBagGrid() end
 end)
@@ -497,7 +501,7 @@ for i = 1, 80 do
     b:Hide()
 end
 
-function RenderBagGrid()
+RenderBagGrid = function()
     for i = 1, #bagButtons do
         local b = bagButtons[i]
         b.itemId, b.itemName, b.bag, b.slot, b.item = nil, nil, nil, nil, nil
