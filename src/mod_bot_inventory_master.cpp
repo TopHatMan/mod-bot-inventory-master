@@ -732,6 +732,11 @@ namespace BotInventoryMaster
 
 
 
+    // Forward declarations for vendor helpers implemented later in this file.
+    // Bulk cleanup lives near the item/protocol helpers but reuses the established vendor checks.
+    static bool IsTradeDistanceOk(Player* a, WorldObject* b);
+    static Creature* GetSelectedVendor(ChatHandler* handler, Player* manager, std::string& reason);
+
     static bool IsHardBulkProtectedEntry(uint32 entry)
     {
         switch (entry)
