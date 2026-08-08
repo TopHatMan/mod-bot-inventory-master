@@ -74,5 +74,7 @@ BotInventoryMaster.Bulk.MaxQuality = 2
 # Keep <=24 so commands remain safely below the WoW 3.3.5 chat-length limit.
 BotInventoryMaster.Bulk.MaxItemsPerCommand = 24
 
-# Bulk actions always protect quest items, bags/containers, Hearthstone, and Shaman totems even
-# when Danger.AllowAnySell/Destroy is enabled. Single-item danger actions remain unchanged.
+# Bulk actions always protect quest items, bags/containers, Hearthstone, Shaman totems,
+# no-user-destroy items, key/quest-family items, and class/profession tools with a TotemCategory.
+# They only accept normal backpack slots and contents of equipped inventory bags; equipment, bank,
+# keyring, buyback, and other non-bag positions are rejected. Single-item Danger mode is unchanged.
