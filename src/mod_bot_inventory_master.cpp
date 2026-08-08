@@ -158,6 +158,13 @@ namespace BotInventoryMaster
         uint8 Slot = 0;
     };
 
+    struct OwnedBagSlotRef
+    {
+        std::string BotName;
+        uint8 Bag = 0;
+        uint8 Slot = 0;
+    };
+
 
     static std::string Sanitize(std::string text)
     {
@@ -1021,6 +1028,264 @@ namespace BotInventoryMaster
         RememberSelectedBot(manager, target);
         SendOk(handler, Acore::StringFormat("Managing {}.", Sanitize(target->GetName())));
         SendBags(handler, manager, target);
+        return true;
+    }
+
+
+
+
+    static bool ParseOwnedBagSlotList(std::string const& text, std::vector<OwnedBagSlotRef>& refs, std::string& reason)
+    {
+        refs.clear();
+        reason.clear();
+        if (text.empty())
+        {
+            reason = "No party bag slots were supplied.";
+            return false;
+        }
+
+        std::set<std::string> seen;
+        std::istringstream stream(text);
+        std::string token;
+        while (std::getline(stream, token, ';'))
+        {
+            if (token.empty())
+                continue;
+
+            size_t comma1 = token.find(',');
+            size_t comma2 = comma1 == std::string::npos ? std::string::npos : token.find(',', comma1 + 1);
+            if (comma1 == std::string::npos || comma2 == std::string::npos || token.find(',', comma2 + 1) != std::string::npos)
+            {
+                reason = "Party bulk list must use BotName,bag,slot;BotName,bag,slot format.";
+                return false;
+            }
+
+            std::string botName = token.substr(0, comma1);
+            uint32 bag = 0;
+            uint32 slot = 0;
+            if (botName.empty() || !TryParseUInt32(token.substr(comma1 + 1, comma2 - comma1 - 1), bag) ||
+                !TryParseUInt32(token.substr(comma2 + 1), slot) ||
+                bag > std::numeric_limits<uint8>::max() || slot > std::numeric_limits<uint8>::max())
+            {
+                reason = "Party bulk list contains an invalid bot, bag, or slot.";
+                return false;
+            }
+
+            std::string key = ToLower(botName) + ":" + std::to_string(bag) + ":" + std::to_string(slot);
+            if (!seen.insert(key).second)
+                continue;
+
+            refs.push_back({ botName, uint8(bag), uint8(slot) });
+            if (refs.size() > g_bulkMaxItemsPerCommand)
+            {
+                reason = Acore::StringFormat("Party bulk command exceeds the configured {}-stack limit.", g_bulkMaxItemsPerCommand);
+                return false;
+            }
+        }
+
+        if (refs.empty())
+        {
+            reason = "No valid party bag slots were supplied.";
+            return false;
+        }
+        return true;
+    }
+
+    static Player* FindManagedPartyBot(Player* manager, std::string const& botName, std::string& reason)
+    {
+        reason.clear();
+        if (!manager || !manager->GetGroup())
+        {
+            reason = "You are not in a group.";
+            return nullptr;
+        }
+
+        Player* target = ObjectAccessor::FindPlayerByName(botName);
+        if (!target || !target->IsInWorld() || target == manager || target->GetGroup() != manager->GetGroup())
+        {
+            reason = Acore::StringFormat("{} is not an online member of your group.", Sanitize(botName));
+            return nullptr;
+        }
+
+        if (!CanManageTarget(manager, target, reason))
+            return nullptr;
+        return target;
+    }
+
+    static void SendPartyBags(ChatHandler* handler, Player* manager)
+    {
+        if (!handler || !manager)
+            return;
+
+        Group* group = manager->GetGroup();
+        if (!group)
+        {
+            SendError(handler, "You are not in a group.");
+            return;
+        }
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:PBAG:BEGIN:{}", g_bulkMaxQuality));
+        uint32 botCount = 0;
+
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->GetSource();
+            if (!member || member == manager || !member->IsInWorld())
+                continue;
+
+            std::string reason;
+            if (!CanManageTarget(manager, member, reason))
+                continue;
+
+            ++botCount;
+            SendProtocol(handler, Acore::StringFormat("BOTINV:PBAG:BOT:{}:{}:{}",
+                Sanitize(member->GetName()), CountFreeBagSlots(member), member->GetMoney()));
+
+            for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            {
+                if (Item* item = member->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                    SendItemRecord(handler, "BOTINV:PBAG:ITEM", member, uint32(INVENTORY_SLOT_BAG_0), uint32(slot), item);
+            }
+
+            for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
+            {
+                Bag* bag = member->GetBagByPos(bagSlot);
+                if (!bag)
+                    continue;
+                for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+                    if (Item* item = bag->GetItemByPos(uint8(slot)))
+                        SendItemRecord(handler, "BOTINV:PBAG:ITEM", member, uint32(bagSlot), slot, item);
+            }
+        }
+
+        SendProtocol(handler, Acore::StringFormat("BOTINV:PBAG:END:{}", botCount));
+    }
+
+    static bool HandlePartyDestroyBatch(ChatHandler* handler, Player* manager, std::string const& listText,
+        bool confirm, bool refresh)
+    {
+        if (!manager || !manager->GetGroup())
+        {
+            SendError(handler, "You are not in a group.");
+            return true;
+        }
+        if (!confirm)
+        {
+            SendError(handler, "Party bulk destroy requires confirm.");
+            return true;
+        }
+
+        std::string reason;
+        std::vector<OwnedBagSlotRef> refs;
+        if (!ParseOwnedBagSlotList(listText, refs, reason))
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        std::map<std::string, std::vector<BagSlotRef>> byBot;
+        for (OwnedBagSlotRef const& ref : refs)
+            byBot[ref.BotName].push_back({ ref.Bag, ref.Slot });
+
+        BulkCleanupStats total;
+        for (auto const& pair : byBot)
+        {
+            Player* target = FindManagedPartyBot(manager, pair.first, reason);
+            if (!target)
+            {
+                total.SkippedStacks += uint32(pair.second.size());
+                continue;
+            }
+
+            BulkCleanupStats stats;
+            for (BagSlotRef const& ref : pair.second)
+                RemoveBulkItem(target, ref, false, stats);
+
+            total.Items += stats.Items;
+            total.Stacks += stats.Stacks;
+            total.SkippedStacks += stats.SkippedStacks;
+            total.FailedStacks += stats.FailedStacks;
+            SendProtocol(handler, Acore::StringFormat("BOTINV:BULK:DESTROY:{}:{}:{}:{}:{}",
+                Sanitize(target->GetName()), stats.Items, stats.Stacks, stats.SkippedStacks, stats.FailedStacks));
+        }
+
+        SendOk(handler, Acore::StringFormat("Party bulk-delete removed {} item(s) in {} stack(s); {} skipped, {} failed verification.",
+            total.Items, total.Stacks, total.SkippedStacks, total.FailedStacks));
+        if (refresh)
+            SendPartyBags(handler, manager);
+        return true;
+    }
+
+    static bool HandlePartySellBatch(ChatHandler* handler, Player* manager, std::string const& listText,
+        bool confirm, bool refresh)
+    {
+        if (!g_allowSellSelected)
+        {
+            SendError(handler, "Selected item selling is disabled in config.");
+            return true;
+        }
+        if (!manager || !manager->GetGroup())
+        {
+            SendError(handler, "You are not in a group.");
+            return true;
+        }
+        if (!confirm)
+        {
+            SendError(handler, "Party bulk sell requires confirm.");
+            return true;
+        }
+
+        std::string reason;
+        Creature* vendor = GetSelectedVendor(handler, manager, reason);
+        if (!vendor)
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        std::vector<OwnedBagSlotRef> refs;
+        if (!ParseOwnedBagSlotList(listText, refs, reason))
+        {
+            SendError(handler, reason);
+            return true;
+        }
+
+        std::map<std::string, std::vector<BagSlotRef>> byBot;
+        for (OwnedBagSlotRef const& ref : refs)
+            byBot[ref.BotName].push_back({ ref.Bag, ref.Slot });
+
+        BulkCleanupStats total;
+        for (auto const& pair : byBot)
+        {
+            Player* target = FindManagedPartyBot(manager, pair.first, reason);
+            if (!target || !IsTradeDistanceOk(target, vendor))
+            {
+                total.SkippedStacks += uint32(pair.second.size());
+                continue;
+            }
+
+            BulkCleanupStats stats;
+            for (BagSlotRef const& ref : pair.second)
+                RemoveBulkItem(target, ref, true, stats);
+
+            uint64 creditedCopper = std::min<uint64>(stats.Copper, uint64(std::numeric_limits<int32>::max()));
+            if (creditedCopper)
+                target->ModifyMoney(int32(creditedCopper));
+            stats.Copper = creditedCopper;
+
+            total.Items += stats.Items;
+            total.Stacks += stats.Stacks;
+            total.SkippedStacks += stats.SkippedStacks;
+            total.FailedStacks += stats.FailedStacks;
+            total.Copper += stats.Copper;
+            SendProtocol(handler, Acore::StringFormat("BOTINV:BULK:SELL:{}:{}:{}:{}:{}:{}",
+                Sanitize(target->GetName()), stats.Items, stats.Stacks, stats.SkippedStacks, stats.FailedStacks, stats.Copper));
+        }
+
+        SendOk(handler, Acore::StringFormat("Party bulk-sell removed {} item(s) in {} stack(s) for {} copper; {} skipped, {} failed verification.",
+            total.Items, total.Stacks, total.Copper, total.SkippedStacks, total.FailedStacks));
+        if (refresh)
+            SendPartyBags(handler, manager);
         return true;
     }
 
@@ -2250,13 +2515,14 @@ namespace BotInventoryMaster
 
     static void SendUsage(ChatHandler* handler)
     {
-        SendProtocol(handler, "BOTINV:USAGE:.botinv bots | use <botName> | vendor set | target bags | target equipment | target sellbatch <bag,slot;...> confirm | target destroybatch <bag,slot;...> confirm | target equip <bag> <slot> | target equipbag <bag> <slot> | target unequip <equipSlot> | target take <bag> <slot> | target find <itemEntry> | target sell gray confirm | target sell <bag> <slot> [confirm] | target buyback list | target buyback <id> | target destroy gray confirm | target destroy <bag> <slot> [confirm] | party destroy gray confirm | target deposit reagents | party deposit reagents | bank");
+        SendProtocol(handler, "BOTINV:USAGE:.botinv bots | use <botName> | vendor set | target bags | party bags | target sellbatch <bag,slot;...> confirm | target destroybatch <bag,slot;...> confirm | party sellbatch <Bot,bag,slot;...> confirm [refresh] | party destroybatch <Bot,bag,slot;...> confirm [refresh] | target equipment | target equip <bag> <slot> | target equipbag <bag> <slot> | target unequip <equipSlot> | target take <bag> <slot> | target find <itemEntry> | target sell gray confirm | target sell <bag> <slot> [confirm] | target buyback list | target buyback <id> | target destroy gray confirm | target destroy <bag> <slot> [confirm] | party destroy gray confirm | target deposit reagents | party deposit reagents | bank");
         handler->SendSysMessage("BotInventoryMaster commands:");
         handler->SendSysMessage(".botinv bots");
         handler->SendSysMessage(".botinv use <botName>");
         handler->SendSysMessage(".botinv vendor set");
         handler->SendSysMessage("Note: scanning target bags remembers that bot, so vendor actions can work while a vendor is targeted.");
         handler->SendSysMessage(".botinv target bags");
+        handler->SendSysMessage(".botinv party bags");
         handler->SendSysMessage(".botinv target equipment");
         handler->SendSysMessage(".botinv target equip <bag> <slot>");
         handler->SendSysMessage(".botinv target equipbag <bag> <slot>");
@@ -2270,6 +2536,8 @@ namespace BotInventoryMaster
         handler->SendSysMessage(".botinv target buyback <id>");
         handler->SendSysMessage(".botinv target destroy gray confirm");
         handler->SendSysMessage(".botinv target destroybatch <bag,slot;bag,slot;...> confirm");
+        handler->SendSysMessage(".botinv party sellbatch <Bot,bag,slot;...> confirm [refresh]");
+        handler->SendSysMessage(".botinv party destroybatch <Bot,bag,slot;...> confirm [refresh]");
         handler->SendSysMessage(".botinv party destroy gray confirm");
         handler->SendSysMessage(".botinv target destroy <bag> <slot> [confirm]");
         handler->SendSysMessage(".botinv target deposit reagents");
@@ -2556,6 +2824,26 @@ private:
 
         if (command == "party")
         {
+            if (tokens.size() >= 2 && BotInventoryMaster::ToLower(tokens[1]) == "bags")
+            {
+                BotInventoryMaster::SendPartyBags(handler, manager);
+                return true;
+            }
+
+            if (tokens.size() >= 3 && BotInventoryMaster::ToLower(tokens[1]) == "sellbatch")
+            {
+                bool confirm = tokens.size() >= 4 && BotInventoryMaster::ToLower(tokens[3]) == "confirm";
+                bool refresh = tokens.size() >= 5 && BotInventoryMaster::ToLower(tokens[4]) == "refresh";
+                return BotInventoryMaster::HandlePartySellBatch(handler, manager, tokens[2], confirm, refresh);
+            }
+
+            if (tokens.size() >= 3 && BotInventoryMaster::ToLower(tokens[1]) == "destroybatch")
+            {
+                bool confirm = tokens.size() >= 4 && BotInventoryMaster::ToLower(tokens[3]) == "confirm";
+                bool refresh = tokens.size() >= 5 && BotInventoryMaster::ToLower(tokens[4]) == "refresh";
+                return BotInventoryMaster::HandlePartyDestroyBatch(handler, manager, tokens[2], confirm, refresh);
+            }
+
             if (tokens.size() >= 4 &&
                 BotInventoryMaster::ToLower(tokens[1]) == "destroy" &&
                 BotInventoryMaster::ToLower(tokens[2]) == "gray")

@@ -229,3 +229,25 @@ Bulk safety is intentionally stricter than the existing v8 single-item Danger mo
 - bulk sell creates the same module buyback records used by selected-item selling
 
 The existing right-click shortcuts remain single-item actions, so deliberate one-off danger-mode control still works independently of bulk cleanup.
+
+
+### Party Bags: all managed bots in one view
+
+Use the new **Party Bags** button (or `.botinv party bags`) to load the occupied bag stacks from every manageable online bot in your current group into one addon view.
+
+- sorting and Gray/White/Green/Food selectors work across the whole party view
+- selections can span multiple bots
+- **Sell Checked** groups selected stacks by owner and credits each bot's own money
+- **Delete Checked** removes the selected stacks from their actual owners
+- the view is paged at 80 occupied stacks per page, while selection persists across pages
+- each tooltip shows the owning bot
+- direct right-click/equip/take actions are disabled in the aggregate view; click that bot's quick button first for one-character operations
+- party batch commands refresh the combined view only after the final queued chunk, avoiding thousands of redundant protocol lines on large cleanups
+
+Server protocol/commands:
+
+```text
+.botinv party bags
+.botinv party sellbatch <BotName,bag,slot;...> confirm [refresh]
+.botinv party destroybatch <BotName,bag,slot;...> confirm [refresh]
+```

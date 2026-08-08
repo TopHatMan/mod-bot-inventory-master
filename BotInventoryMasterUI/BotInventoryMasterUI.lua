@@ -32,6 +32,10 @@ local botButtons = {}
 local bagItems = {}
 local selectedItems = {}
 local sortMode = "best"
+local partyView = false
+local currentPage = 1
+local PAGE_SIZE = 80
+local partyBotCount = 0
 local lastBotMoneyCopper = 0
 local lastBotFreeSlots = 0
 local lastBotName = nil
@@ -91,15 +95,18 @@ MakeButton(f, "Bots", 24, -62, 55, 22, function() SendCmd(".botinv bots") end)
 MakeButton(f, "Bags", 83, -62, 55, 22, function() SendCmd(".botinv target bags") end)
 MakeButton(f, "Gear", 142, -62, 55, 22, function() SendCmd(".botinv target equipment") end)
 MakeButton(f, "Equip", 201, -62, 60, 22, function()
+    if partyView then UpdateSelectionStatus("click a bot button before single-item equip"); return end
     if selectedBag and selectedSlot then SendCmd(".botinv target equip " .. selectedBag .. " " .. selectedSlot) end
 end)
 MakeButton(f, "Unequip", 265, -62, 72, 22, function()
     if selectedEquipSlot then SendCmd(".botinv target unequip " .. selectedEquipSlot) end
 end)
 MakeButton(f, "Take", 341, -62, 55, 22, function()
+    if partyView then UpdateSelectionStatus("click a bot button before single-item take"); return end
     if selectedBag and selectedSlot then SendCmd(".botinv target take " .. selectedBag .. " " .. selectedSlot) end
 end)
 MakeButton(f, "Find Item", 400, -62, 80, 22, function()
+    if partyView then UpdateSelectionStatus("click a bot button before single-item find"); return end
     if selectedBag and selectedSlot then
         local btn
         for _, b in ipairs(bagButtons) do if b.bag == selectedBag and b.slot == selectedSlot then btn = b end end
@@ -112,6 +119,7 @@ local sellCheckedButton = MakeButton(f, "Sell Checked", 652, -62, 95, 22, functi
 MakeButton(f, "Bank", 24, -86, 55, 22, function() SendCmd(".botinv bank") end)
 local destroyCheckedButton = MakeButton(f, "Delete Checked", 83, -86, 100, 22, function() end)
 MakeButton(f, "Equip Bag", 187, -86, 82, 22, function()
+    if partyView then UpdateSelectionStatus("click a bot button before single-item bag equip"); return end
     if selectedBag and selectedSlot then SendCmd(".botinv target equipbag " .. selectedBag .. " " .. selectedSlot) end
 end)
 MakeButton(f, "Buybacks", 273, -86, 78, 22, function() SendCmd(".botinv target buyback list") end)
@@ -130,7 +138,7 @@ end)
 
 local sortButton
 local function ItemKey(item)
-    return tostring(item.bag) .. "," .. tostring(item.slot)
+    return tostring(item.ownerName or lastBotName or "?") .. ":" .. tostring(item.bag) .. "," .. tostring(item.slot)
 end
 
 local function IsBulkSelectable(item)
@@ -170,7 +178,7 @@ local function SelectWhere(predicate)
         if IsBulkSelectable(item) and predicate(item) then selectedItems[ItemKey(item)] = true end
     end
     for _, b in ipairs(bagButtons) do
-        if b.bag and b.slot then b:SetChecked(selectedItems[tostring(b.bag) .. "," .. tostring(b.slot)] and true or false) end
+        if b.item then b:SetChecked(selectedItems[ItemKey(b.item)] and true or false) end
     end
     UpdateSelectionStatus()
 end
@@ -195,7 +203,11 @@ local function SendSelectedBulk(action)
     local refs = {}
     for _, item in ipairs(bagItems) do
         if selectedItems[ItemKey(item)] and IsBulkSelectable(item) then
-            table.insert(refs, tostring(item.bag) .. "," .. tostring(item.slot))
+            if partyView then
+                table.insert(refs, tostring(item.ownerName or "?") .. "," .. tostring(item.bag) .. "," .. tostring(item.slot))
+            else
+                table.insert(refs, tostring(item.bag) .. "," .. tostring(item.slot))
+            end
         end
     end
     if #refs == 0 then
@@ -203,17 +215,28 @@ local function SendSelectedBulk(action)
         return
     end
 
-    -- Stay well below the 3.3.5 chat message limit and the server's per-command limit.
+    -- Stay below the 3.3.5 chat message limit. Party refs include a bot name and use smaller chunks.
     local index = 1
     local commands = 0
+    local chunkSize = partyView and 10 or 18
+    local staged = {}
     while index <= #refs do
         local chunk = {}
-        for _ = 1, 18 do
+        for _ = 1, chunkSize do
             if index > #refs then break end
             table.insert(chunk, refs[index])
             index = index + 1
         end
-        QueueBulkCmd(".botinv target " .. action .. "batch " .. table.concat(chunk, ";") .. " confirm")
+        table.insert(staged, chunk)
+    end
+
+    for i, chunk in ipairs(staged) do
+        if partyView then
+            local suffix = i == #staged and " confirm refresh" or " confirm"
+            QueueBulkCmd(".botinv party " .. action .. "batch " .. table.concat(chunk, ";") .. suffix)
+        else
+            QueueBulkCmd(".botinv target " .. action .. "batch " .. table.concat(chunk, ";") .. " confirm")
+        end
         commands = commands + 1
     end
     selectedItems = {}
@@ -234,10 +257,11 @@ MakeButton(f, "Green", 222, -112, 54, 22, function() SelectWhere(function(i) ret
 MakeButton(f, "<= Green", 280, -112, 70, 22, function() SelectWhere(function(i) return (i.quality or 0) <= 2 end) end)
 MakeButton(f, "Food", 354, -112, 54, 22, function() SelectWhere(IsFood) end)
 MakeButton(f, "Clear", 412, -112, 54, 22, ClearSelection)
+MakeButton(f, "Party Bags", 470, -112, 78, 22, function() SendCmd(".botinv party bags") end)
 
 local botLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-botLabel:SetPoint("TOPLEFT", 472, -118)
-botLabel:SetText("Bots: click Bots to refresh")
+botLabel:SetPoint("TOPLEFT", 552, -118)
+botLabel:SetText("Bots")
 
 local function ClearBotButtons()
     botButtonCount = 0
@@ -332,6 +356,17 @@ local bagLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 bagLabel:SetPoint("TOPLEFT", 26, -164)
 bagLabel:SetText("Bot Bags")
 
+pageText = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+pageText:SetPoint("TOPLEFT", 300, -166)
+pageText:SetText("Page 1/1")
+MakeButton(f, "<", 406, -158, 28, 20, function()
+    if currentPage > 1 then currentPage = currentPage - 1; RenderBagGrid() end
+end)
+MakeButton(f, ">", 438, -158, 28, 20, function()
+    currentPage = currentPage + 1
+    RenderBagGrid()
+end)
+
 local equipLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 equipLabel:SetPoint("TOPLEFT", 500, -164)
 equipLabel:SetText("Equipment")
@@ -378,6 +413,7 @@ local function SelectBagButton(btn, toggleBulk)
 end
 
 local function ClearBagGrid()
+    currentPage = 1
     for i = 1, #bagButtons do
         local b = bagButtons[i]
         b.itemId, b.itemName, b.bag, b.slot, b.item = nil, nil, nil, nil, nil
@@ -413,6 +449,10 @@ local function GetBagButton(index)
         if not self.bag or not self.slot then return end
         if button == "RightButton" then
             SelectBagButton(self, false)
+            if partyView then
+                UpdateSelectionStatus("right-click actions need a single bot; click that bot button first")
+                return
+            end
             if IsShiftKeyDown() then
                 SendCmd(".botinv target take " .. self.bag .. " " .. self.slot)
             elseif IsControlKeyDown() then
@@ -438,6 +478,7 @@ local function GetBagButton(index)
             GameTooltip:AddLine("Ctrl-right destroy selected item directly", 0.6, 0.9, 1)
             GameTooltip:AddLine("Alt-right sell selected item directly", 1, 0.8, 0.3)
             GameTooltip:AddLine("Equip Bag button for bigger bags", 0.6, 1, 0.6)
+            if self.item and self.item.ownerName then GameTooltip:AddLine("Owner: " .. self.item.ownerName, 1, 0.82, 0.2) end
             GameTooltip:AddLine("Bot bag " .. tostring(self.bag) .. " slot " .. tostring(self.slot), 0.6, 0.9, 1)
         end
         GameTooltip:Show()
@@ -468,9 +509,16 @@ function RenderBagGrid()
     end
 
     local sorted = SortedBagItems()
-    for i, item in ipairs(sorted) do
-        if i > #bagButtons then break end
-        local b = GetBagButton(i)
+    local totalPages = math.max(1, math.ceil(#sorted / PAGE_SIZE))
+    if currentPage > totalPages then currentPage = totalPages end
+    if currentPage < 1 then currentPage = 1 end
+    local startIndex = (currentPage - 1) * PAGE_SIZE + 1
+    local endIndex = math.min(#sorted, startIndex + PAGE_SIZE - 1)
+    local buttonIndex = 1
+    for i = startIndex, endIndex do
+        local item = sorted[i]
+        local b = GetBagButton(buttonIndex)
+        buttonIndex = buttonIndex + 1
         b.item = item
         b.bag = item.bag
         b.slot = item.slot
@@ -491,6 +539,7 @@ function RenderBagGrid()
         b:SetChecked(selectedItems[ItemKey(item)] and true or false)
         b:Show()
     end
+    if pageText then pageText:SetText("Page " .. tostring(currentPage) .. "/" .. tostring(totalPages) .. " | " .. tostring(#sorted) .. " stacks") end
 end
 
 local slotNames = {
@@ -557,6 +606,7 @@ local function OnProtocol(msg)
     if p[2] == "VENDOR" and p[3] == "SET" then status:SetText("Vendor set: " .. (p[5] or ("entry " .. tostring(p[4])))); return end
 
     if p[2] == "BAG" and p[3] == "BEGIN" then
+        partyView = false
         ClearBagGrid()
         lastBotName = p[4] or "?"
         lastBotFreeSlots = tonumber(p[5]) or 0
@@ -570,6 +620,7 @@ local function OnProtocol(msg)
 
     if p[2] == "BAG" and p[3] == "ITEM" then
         table.insert(bagItems, {
+            ownerName = lastBotName,
             bag = tonumber(p[5]) or 0,
             slot = tonumber(p[6]) or 0,
             itemId = tonumber(p[7]) or 0,
@@ -590,6 +641,55 @@ local function OnProtocol(msg)
         AddLine("Bag grid updated for " .. (lastBotName or "?") .. " | free " .. tostring(lastBotFreeSlots) .. " | money " .. FormatMoney(lastBotMoneyCopper), 0.7, 0.7, 0.7)
         return
     end
+
+
+
+    if p[2] == "PBAG" and p[3] == "BEGIN" then
+        partyView = true
+        ClearBagGrid()
+        lastBotName = "Party"
+        lastBotFreeSlots = 0
+        lastBotMoneyCopper = 0
+        lastBulkMaxQuality = tonumber(p[4]) or 2
+        partyBotCount = 0
+        bagLabel:SetText("Party Bags")
+        UpdateSelectionStatus("loading all manageable group bots")
+        return
+    end
+
+    if p[2] == "PBAG" and p[3] == "BOT" then
+        partyBotCount = partyBotCount + 1
+        lastBotFreeSlots = lastBotFreeSlots + (tonumber(p[5]) or 0)
+        lastBotMoneyCopper = lastBotMoneyCopper + (tonumber(p[6]) or 0)
+        return
+    end
+
+    if p[2] == "PBAG" and p[3] == "ITEM" then
+        table.insert(bagItems, {
+            ownerName = p[4] or "?",
+            bag = tonumber(p[5]) or 0,
+            slot = tonumber(p[6]) or 0,
+            itemId = tonumber(p[7]) or 0,
+            count = tonumber(p[8]) or 0,
+            quality = tonumber(p[9]) or 0,
+            sellPrice = tonumber(p[10]) or 0,
+            itemName = p[11] or ("item " .. tostring(p[7])),
+            classId = tonumber(p[12]) or -1,
+            subClassId = tonumber(p[13]) or -1,
+            inventoryType = tonumber(p[14]) or 0,
+        })
+        return
+    end
+
+    if p[2] == "PBAG" and p[3] == "END" then
+        partyBotCount = tonumber(p[4]) or partyBotCount
+        bagLabel:SetText("Party Bags - " .. tostring(partyBotCount) .. " bots")
+        RenderBagGrid()
+        UpdateSelectionStatus(sortMode == "best" and "party epic -> trash" or "party trash -> epic")
+        AddLine("Party bags loaded: " .. tostring(partyBotCount) .. " manageable bots, " .. tostring(#bagItems) .. " occupied stacks.", 0.4, 0.9, 1.0)
+        return
+    end
+
 
     if p[2] == "EQUIP" and p[3] == "BEGIN" then
         ClearEquip()
