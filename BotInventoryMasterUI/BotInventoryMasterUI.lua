@@ -2,7 +2,7 @@ local addonName = "BotInventoryMasterUI"
 BotInventoryMasterDB = BotInventoryMasterDB or {}
 
 local f = CreateFrame("Frame", "BotInventoryMasterUIFrame", UIParent)
-f:SetSize(790, 590)
+f:SetSize(790, 680)
 f:SetPoint("CENTER")
 f:SetMovable(true)
 f:EnableMouse(true)
@@ -28,10 +28,24 @@ local selectedBag, selectedSlot = nil, nil
 local selectedEquipSlot = nil
 local bagButtons = {}
 local equipRows = {}
+local botButtons = {}
+local bagItems = {}
+local selectedItems = {}
+local sortMode = "best"
 local lastBotMoneyCopper = 0
 local lastBotFreeSlots = 0
 local lastBotName = nil
 local lastBuybackId = nil
+local lastBulkMaxQuality = 2
+local botButtonCount = 0
+local bulkQueue = {}
+local bulkQueueElapsed = 0
+
+local HARD_PROTECTED = { [6948]=true, [5175]=true, [5176]=true, [5177]=true, [5178]=true, [46978]=true }
+local ITEM_CLASS_CONTAINER = 1
+local ITEM_CLASS_QUEST = 12
+local ITEM_CLASS_CONSUMABLE = 0
+local ITEM_SUBCLASS_FOOD_DRINK = 5
 
 local function FormatMoney(copper)
     copper = tonumber(copper) or 0
@@ -46,9 +60,23 @@ local function SendCmd(cmd)
     SendChatMessage(cmd, "SAY")
 end
 
+local bulkSender = CreateFrame("Frame")
+bulkSender:SetScript("OnUpdate", function(self, elapsed)
+    if #bulkQueue == 0 then return end
+    bulkQueueElapsed = bulkQueueElapsed + elapsed
+    if bulkQueueElapsed < 0.30 then return end
+    bulkQueueElapsed = 0
+    local cmd = table.remove(bulkQueue, 1)
+    if cmd then SendCmd(cmd) end
+end)
+
+local function QueueBulkCmd(cmd)
+    table.insert(bulkQueue, cmd)
+end
+
 local status = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 status:SetPoint("TOPLEFT", 24, -42)
-status:SetText("Target bot. Right-click equip. Shift-right take. Ctrl-right destroy ANY. Alt-right sell ANY. No warnings.")
+status:SetText("Click items to multi-select. Bulk mode protects quest items, bags, key utilities, and gear above the configured quality ceiling.")
 
 local function MakeButton(parent, text, x, y, w, h, onclick)
     local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
@@ -80,27 +108,159 @@ MakeButton(f, "Find Item", 400, -62, 80, 22, function()
 end)
 MakeButton(f, "Set Vendor", 484, -62, 88, 22, function() SendCmd(".botinv vendor set") end)
 MakeButton(f, "Sell Gray", 576, -62, 82, 22, function() StaticPopup_Show("BOTINV_SELL_GRAY_CONFIRM") end)
-MakeButton(f, "Sell Sel", 662, -62, 75, 22, function()
-    if selectedBag and selectedSlot then SendCmd(".botinv target sell " .. selectedBag .. " " .. selectedSlot) end
-end)
+local sellCheckedButton = MakeButton(f, "Sell Checked", 652, -62, 95, 22, function() end)
 MakeButton(f, "Bank", 24, -86, 55, 22, function() SendCmd(".botinv bank") end)
-MakeButton(f, "Destroy Sel", 83, -86, 90, 22, function()
-    if selectedBag and selectedSlot then SendCmd(".botinv target destroy " .. selectedBag .. " " .. selectedSlot) end
-end)
-MakeButton(f, "Equip Bag", 177, -86, 82, 22, function()
+local destroyCheckedButton = MakeButton(f, "Delete Checked", 83, -86, 100, 22, function() end)
+MakeButton(f, "Equip Bag", 187, -86, 82, 22, function()
     if selectedBag and selectedSlot then SendCmd(".botinv target equipbag " .. selectedBag .. " " .. selectedSlot) end
 end)
-MakeButton(f, "Buybacks", 263, -86, 78, 22, function() SendCmd(".botinv target buyback list") end)
-MakeButton(f, "Buy Last", 345, -86, 76, 22, function()
+MakeButton(f, "Buybacks", 273, -86, 78, 22, function() SendCmd(".botinv target buyback list") end)
+MakeButton(f, "Buy Last", 355, -86, 76, 22, function()
     if lastBuybackId then SendCmd(".botinv target buyback " .. lastBuybackId) end
 end)
-MakeButton(f, "Deposit", 425, -86, 75, 22, function() SendCmd(".botinv target deposit reagents") end)
-MakeButton(f, "Destroy Gray Bot", 504, -86, 115, 22, function()
+MakeButton(f, "Deposit", 435, -86, 75, 22, function() SendCmd(".botinv target deposit reagents") end)
+MakeButton(f, "Destroy Gray Bot", 514, -86, 110, 22, function()
     StaticPopup_Show("BOTINV_DESTROY_GRAY_TARGET_CONFIRM")
 end)
-MakeButton(f, "Destroy Gray Party", 623, -86, 125, 22, function()
+MakeButton(f, "Destroy Gray Party", 628, -86, 120, 22, function()
     StaticPopup_Show("BOTINV_DESTROY_GRAY_PARTY_CONFIRM")
 end)
+
+
+
+local sortButton
+local function ItemKey(item)
+    return tostring(item.bag) .. "," .. tostring(item.slot)
+end
+
+local function IsBulkSelectable(item)
+    if not item then return false end
+    if item.classId == ITEM_CLASS_QUEST or item.classId == ITEM_CLASS_CONTAINER then return false end
+    if HARD_PROTECTED[item.itemId or 0] then return false end
+    return (item.quality or 0) <= (lastBulkMaxQuality or 2)
+end
+
+local function IsFood(item)
+    return item and item.classId == ITEM_CLASS_CONSUMABLE and item.subClassId == ITEM_SUBCLASS_FOOD_DRINK
+end
+
+local function SelectionCount()
+    local n = 0
+    for _ in pairs(selectedItems) do n = n + 1 end
+    return n
+end
+
+local function UpdateSelectionStatus(extra)
+    local selected = SelectionCount()
+    local bot = lastBotName or "no bot"
+    local base = bot .. " | selected " .. selected .. " | free " .. tostring(lastBotFreeSlots) .. " | " .. FormatMoney(lastBotMoneyCopper)
+    if extra and extra ~= "" then base = base .. " | " .. extra end
+    status:SetText(base)
+end
+
+local function ClearSelection()
+    selectedItems = {}
+    for _, b in ipairs(bagButtons) do b:SetChecked(false) end
+    UpdateSelectionStatus("selection cleared")
+end
+
+local function SelectWhere(predicate)
+    selectedItems = {}
+    for _, item in ipairs(bagItems) do
+        if IsBulkSelectable(item) and predicate(item) then selectedItems[ItemKey(item)] = true end
+    end
+    for _, b in ipairs(bagButtons) do
+        if b.bag and b.slot then b:SetChecked(selectedItems[tostring(b.bag) .. "," .. tostring(b.slot)] and true or false) end
+    end
+    UpdateSelectionStatus()
+end
+
+local function SortedBagItems()
+    local sorted = {}
+    for i, item in ipairs(bagItems) do sorted[i] = item end
+    table.sort(sorted, function(a, b)
+        local aq, bq = a.quality or 0, b.quality or 0
+        if aq ~= bq then
+            if sortMode == "trash" then return aq < bq else return aq > bq end
+        end
+        local an, bn = string.lower(a.itemName or ""), string.lower(b.itemName or "")
+        if an ~= bn then return an < bn end
+        if a.bag ~= b.bag then return a.bag < b.bag end
+        return a.slot < b.slot
+    end)
+    return sorted
+end
+
+local function SendSelectedBulk(action)
+    local refs = {}
+    for _, item in ipairs(bagItems) do
+        if selectedItems[ItemKey(item)] and IsBulkSelectable(item) then
+            table.insert(refs, tostring(item.bag) .. "," .. tostring(item.slot))
+        end
+    end
+    if #refs == 0 then
+        UpdateSelectionStatus("nothing bulk-safe selected")
+        return
+    end
+
+    -- Stay well below the 3.3.5 chat message limit and the server's per-command limit.
+    local index = 1
+    local commands = 0
+    while index <= #refs do
+        local chunk = {}
+        for _ = 1, 18 do
+            if index > #refs then break end
+            table.insert(chunk, refs[index])
+            index = index + 1
+        end
+        QueueBulkCmd(".botinv target " .. action .. "batch " .. table.concat(chunk, ";") .. " confirm")
+        commands = commands + 1
+    end
+    selectedItems = {}
+    UpdateSelectionStatus("queued " .. tostring(#refs) .. " stack(s) in " .. tostring(commands) .. " batch command(s)")
+end
+
+sellCheckedButton:SetScript("OnClick", function() SendSelectedBulk("sell") end)
+destroyCheckedButton:SetScript("OnClick", function() SendSelectedBulk("destroy") end)
+
+sortButton = MakeButton(f, "Sort: Best", 24, -112, 82, 22, function(self)
+    sortMode = sortMode == "best" and "trash" or "best"
+    self:SetText(sortMode == "best" and "Sort: Best" or "Sort: Trash")
+    if RenderBagGrid then RenderBagGrid() end
+end)
+MakeButton(f, "Gray", 110, -112, 52, 22, function() SelectWhere(function(i) return i.quality == 0 end) end)
+MakeButton(f, "White", 166, -112, 52, 22, function() SelectWhere(function(i) return i.quality == 1 end) end)
+MakeButton(f, "Green", 222, -112, 54, 22, function() SelectWhere(function(i) return i.quality == 2 end) end)
+MakeButton(f, "<= Green", 280, -112, 70, 22, function() SelectWhere(function(i) return (i.quality or 0) <= 2 end) end)
+MakeButton(f, "Food", 354, -112, 54, 22, function() SelectWhere(IsFood) end)
+MakeButton(f, "Clear", 412, -112, 54, 22, ClearSelection)
+
+local botLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+botLabel:SetPoint("TOPLEFT", 472, -118)
+botLabel:SetText("Bots: click Bots to refresh")
+
+local function ClearBotButtons()
+    botButtonCount = 0
+    for _, b in ipairs(botButtons) do b:Hide() end
+end
+
+local function AddBotButton(name, manageable)
+    if manageable ~= "1" or not name or name == "" then return end
+    botButtonCount = botButtonCount + 1
+    if botButtonCount > 5 then return end
+    local b = botButtons[botButtonCount]
+    if not b then
+        b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        b:SetSize(52, 20)
+        botButtons[botButtonCount] = b
+    end
+    b:SetPoint("TOPLEFT", 472 + (botButtonCount - 1) * 55, -134)
+    b:SetText(string.sub(name, 1, 7))
+    b.botName = name
+    b:SetScript("OnClick", function(self) SendCmd(".botinv use " .. self.botName) end)
+    b:Show()
+end
+
 
 StaticPopupDialogs["BOTINV_DESTROY_CONFIRM"] = {
     text = "Destroy the selected gray item from the bot's bag?",
@@ -169,15 +329,15 @@ StaticPopupDialogs["BOTINV_SELL_SELECTED_CONFIRM"] = {
 }
 
 local bagLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-bagLabel:SetPoint("TOPLEFT", 26, -116)
+bagLabel:SetPoint("TOPLEFT", 26, -164)
 bagLabel:SetText("Bot Bags")
 
 local equipLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-equipLabel:SetPoint("TOPLEFT", 500, -116)
+equipLabel:SetPoint("TOPLEFT", 500, -164)
 equipLabel:SetText("Equipment")
 
 local log = CreateFrame("ScrollingMessageFrame", nil, f)
-log:SetPoint("TOPLEFT", 24, -456)
+log:SetPoint("TOPLEFT", 24, -528)
 log:SetPoint("BOTTOMRIGHT", -24, 26)
 log:SetFontObject(GameFontHighlightSmall)
 log:SetJustifyH("LEFT")
@@ -197,25 +357,38 @@ local function ClearLog(header)
     AddLine(header, 0.4, 0.9, 1.0)
 end
 
-local function SelectBagButton(btn)
+local function SelectBagButton(btn, toggleBulk)
     selectedBag = btn.bag
     selectedSlot = btn.slot
-    for _, other in ipairs(bagButtons) do
-        if other ~= btn then other:SetChecked(false) end
+    if toggleBulk then
+        local item = btn.item
+        if IsBulkSelectable(item) then
+            local key = ItemKey(item)
+            if selectedItems[key] then selectedItems[key] = nil else selectedItems[key] = true end
+        else
+            UpdateSelectionStatus("this item is protected from bulk cleanup")
+        end
     end
-    btn:SetChecked(true)
-    status:SetText("Selected bag " .. tostring(selectedBag) .. " slot " .. tostring(selectedSlot) .. " | " .. (btn.itemName or "item"))
+    for _, other in ipairs(bagButtons) do
+        if other.bag and other.slot then
+            other:SetChecked(selectedItems[tostring(other.bag) .. "," .. tostring(other.slot)] and true or false)
+        end
+    end
+    UpdateSelectionStatus((btn.itemName or "item") .. " @ " .. tostring(selectedBag) .. "/" .. tostring(selectedSlot))
 end
 
 local function ClearBagGrid()
     for i = 1, #bagButtons do
         local b = bagButtons[i]
-        b.itemId, b.itemName, b.bag, b.slot = nil, nil, nil, nil
+        b.itemId, b.itemName, b.bag, b.slot, b.item = nil, nil, nil, nil, nil
         b.icon:SetTexture(nil)
         b.count:SetText("")
+        if b.qualityText then b.qualityText:SetText("") end
         b:SetChecked(false)
         b:Hide()
     end
+    bagItems = {}
+    selectedItems = {}
     selectedBag, selectedSlot = nil, nil
 end
 
@@ -233,11 +406,13 @@ local function GetBagButton(index)
     b.icon:SetSize(30, 30)
     b.count = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
     b.count:SetPoint("BOTTOMRIGHT", -2, 2)
+    b.qualityText = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    b.qualityText:SetPoint("TOPLEFT", 2, -2)
 
     b:SetScript("OnClick", function(self, button)
         if not self.bag or not self.slot then return end
         if button == "RightButton" then
-            SelectBagButton(self)
+            SelectBagButton(self, false)
             if IsShiftKeyDown() then
                 SendCmd(".botinv target take " .. self.bag .. " " .. self.slot)
             elseif IsControlKeyDown() then
@@ -248,7 +423,7 @@ local function GetBagButton(index)
                 SendCmd(".botinv target equip " .. self.bag .. " " .. self.slot)
             end
         else
-            SelectBagButton(self)
+            SelectBagButton(self, true)
         end
     end)
 
@@ -256,7 +431,8 @@ local function GetBagButton(index)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         if self.itemId then
             GameTooltip:SetHyperlink("item:" .. self.itemId)
-            GameTooltip:AddLine("Left-click select", 0.6, 0.9, 1)
+            GameTooltip:AddLine("Left-click toggle bulk selection", 0.6, 0.9, 1)
+            GameTooltip:AddLine("Bulk cleanup is capped by server quality/protection rules", 0.5, 1, 0.5)
             GameTooltip:AddLine("Right-click equip", 0.6, 0.9, 1)
             GameTooltip:AddLine("Shift-right take/trade to you", 0.6, 0.9, 1)
             GameTooltip:AddLine("Ctrl-right destroy selected item directly", 0.6, 0.9, 1)
@@ -276,8 +452,45 @@ for i = 1, 80 do
     local b = GetBagButton(i)
     local col = (i - 1) % 10
     local row = math.floor((i - 1) / 10)
-    b:SetPoint("TOPLEFT", 26 + col * 42, -138 - row * 42)
+    b:SetPoint("TOPLEFT", 26 + col * 42, -190 - row * 42)
     b:Hide()
+end
+
+function RenderBagGrid()
+    for i = 1, #bagButtons do
+        local b = bagButtons[i]
+        b.itemId, b.itemName, b.bag, b.slot, b.item = nil, nil, nil, nil, nil
+        b.icon:SetTexture(nil)
+        b.count:SetText("")
+        if b.qualityText then b.qualityText:SetText("") end
+        b:SetChecked(false)
+        b:Hide()
+    end
+
+    local sorted = SortedBagItems()
+    for i, item in ipairs(sorted) do
+        if i > #bagButtons then break end
+        local b = GetBagButton(i)
+        b.item = item
+        b.bag = item.bag
+        b.slot = item.slot
+        b.itemId = item.itemId
+        b.itemName = item.itemName
+        b.quality = item.quality
+        b.classId = item.classId
+        b.subClassId = item.subClassId
+        b.icon:SetTexture(GetItemIcon(item.itemId or 0))
+        b.count:SetText((item.count or 0) > 1 and tostring(item.count) or "")
+        local q = item.quality or 0
+        local marks = { [0]="J", [1]="C", [2]="U", [3]="R", [4]="E" }
+        b.qualityText:SetText(marks[q] or tostring(q))
+        if GetItemQualityColor then
+            local r, g, bl = GetItemQualityColor(q)
+            b.qualityText:SetTextColor(r or 1, g or 1, bl or 1)
+        end
+        b:SetChecked(selectedItems[ItemKey(item)] and true or false)
+        b:Show()
+    end
 end
 
 local slotNames = {
@@ -303,7 +516,7 @@ end
 for i = 0, 18 do
     local row = CreateFrame("Button", nil, f)
     row:SetSize(255, 16)
-    row:SetPoint("TOPLEFT", 500, -138 - i * 16)
+    row:SetPoint("TOPLEFT", 500, -190 - i * 16)
     row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
     row.text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -329,7 +542,6 @@ for i = 0, 18 do
     equipRows[i] = row
 end
 
-local bagInsertIndex = 1
 
 local function Split(msg)
     local parts = {}
@@ -346,32 +558,35 @@ local function OnProtocol(msg)
 
     if p[2] == "BAG" and p[3] == "BEGIN" then
         ClearBagGrid()
-        bagInsertIndex = 1
         lastBotName = p[4] or "?"
         lastBotFreeSlots = tonumber(p[5]) or 0
         lastBotMoneyCopper = tonumber(p[6]) or 0
-        status:SetText("Bag view: " .. lastBotName .. " | free slots " .. lastBotFreeSlots .. " | money " .. FormatMoney(lastBotMoneyCopper))
+        lastBulkMaxQuality = tonumber(p[7]) or 2
+        bagLabel:SetText("Bot Bags - " .. lastBotName)
+        UpdateSelectionStatus("bulk max quality " .. tostring(lastBulkMaxQuality))
         AddLine("Refreshing bags: " .. lastBotName .. " | free " .. lastBotFreeSlots .. " | money " .. FormatMoney(lastBotMoneyCopper), 0.4, 0.9, 1.0)
         return
     end
 
     if p[2] == "BAG" and p[3] == "ITEM" then
-        local b = GetBagButton(bagInsertIndex)
-        bagInsertIndex = bagInsertIndex + 1
-        b:Show()
-        b.bag = tonumber(p[5])
-        b.slot = tonumber(p[6])
-        b.itemId = tonumber(p[7])
-        b.quality = tonumber(p[9]) or 0
-        b.itemName = p[11] or ("item " .. tostring(p[7]))
-        b.icon:SetTexture(GetItemIcon(b.itemId or 0))
-        local count = tonumber(p[8]) or 0
-        b.count:SetText(count > 1 and tostring(count) or "")
-        b:SetChecked(false)
+        table.insert(bagItems, {
+            bag = tonumber(p[5]) or 0,
+            slot = tonumber(p[6]) or 0,
+            itemId = tonumber(p[7]) or 0,
+            count = tonumber(p[8]) or 0,
+            quality = tonumber(p[9]) or 0,
+            sellPrice = tonumber(p[10]) or 0,
+            itemName = p[11] or ("item " .. tostring(p[7])),
+            classId = tonumber(p[12]) or -1,
+            subClassId = tonumber(p[13]) or -1,
+            inventoryType = tonumber(p[14]) or 0,
+        })
         return
     end
 
     if p[2] == "BAG" and p[3] == "END" then
+        RenderBagGrid()
+        UpdateSelectionStatus(sortMode == "best" and "epic -> trash" or "trash -> epic")
         AddLine("Bag grid updated for " .. (lastBotName or "?") .. " | free " .. tostring(lastBotFreeSlots) .. " | money " .. FormatMoney(lastBotMoneyCopper), 0.7, 0.7, 0.7)
         return
     end
@@ -398,11 +613,12 @@ local function OnProtocol(msg)
 
     if p[2] == "EQUIP" and p[3] == "END" then AddLine("Loaded equipment.", 0.7, 0.7, 0.7); return end
 
-    if p[2] == "BOTS" and p[3] == "BEGIN" then ClearLog("Bots / manageable characters"); return end
+    if p[2] == "BOTS" and p[3] == "BEGIN" then ClearLog("Bots / manageable characters"); ClearBotButtons(); return end
     if p[2] == "BOTS" and p[3] == "END" then AddLine("End of bots.", 0.7, 0.7, 0.7); return end
     if p[2] == "BOT" then
         AddLine(string.format("%s | guid %s | acct %s | lvl %s | class %s | free %s | manageable %s",
             p[3] or "?", p[4] or "?", p[5] or "?", p[6] or "?", p[7] or "?", p[8] or "?", p[9] == "1" and "yes" or "no"))
+        AddBotButton(p[3], p[9])
         return
     end
 
@@ -423,6 +639,16 @@ local function OnProtocol(msg)
 
     if p[2] == "DESTROY" and p[3] == "GRAY" then
         AddLine(string.format("%s destroyed %s gray item(s), %s stack(s).", p[4] or "?", p[5] or "0", p[6] or "0"), 1, 0.8, 0.4)
+        return
+    end
+
+    if p[2] == "BULK" and p[3] == "DESTROY" then
+        AddLine(string.format("%s bulk-deleted %s item(s) / %s stack(s); skipped %s, failed %s.", p[4] or "?", p[5] or "0", p[6] or "0", p[7] or "0", p[8] or "0"), 1, 0.6, 0.3)
+        return
+    end
+
+    if p[2] == "BULK" and p[3] == "SELL" then
+        AddLine(string.format("%s bulk-sold %s item(s) / %s stack(s); skipped %s, failed %s, %s copper.", p[4] or "?", p[5] or "0", p[6] or "0", p[7] or "0", p[8] or "0", p[9] or "0"), 0.5, 1, 0.5)
         return
     end
 
@@ -479,5 +705,5 @@ end)
 SLASH_BOTINVENTORYMASTERUI1 = "/botinvui"
 SLASH_BOTINVENTORYMASTERUI2 = "/bim"
 SlashCmdList["BOTINVENTORYMASTERUI"] = function()
-    if f:IsShown() then f:Hide() else f:Show() end
+    if f:IsShown() then f:Hide() else f:Show(); SendCmd(".botinv bots") end
 end

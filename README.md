@@ -196,3 +196,36 @@ Danger notes:
 - Bags/containers can be destroyed/sold if danger mode is enabled.
 - Destroying or selling a bag may remove the bag and whatever is inside it depending on core behavior.
 - Equipment moving remains loss-safe: equip/unequip still validates and attempts rollback if storage/equip fails.
+
+
+## v9 bulk inventory cleanup UI
+
+This pass targets multi-box/playerbot bag clutter directly.
+
+Addon changes:
+- normal left-click now toggles **multi-selection** instead of forcing one selected item
+- **Sell Checked** and **Delete Checked** send selected stacks in compact batch commands
+- large selections are automatically chunked to stay under the WoW 3.3.5 chat-message limit
+- **Sort: Best / Sort: Trash** changes only the addon view; it never physically rearranges bot bags
+- quick selectors: Gray, White, Green, <= Green, Food, Clear
+- quality marker on each bag icon: J/C/U/R/E
+- `.botinv bots` now creates up to five clickable bot buttons; clicking one uses `.botinv use <name>` so a five-character party can be managed without retargeting every character in the world
+
+Server commands added:
+
+```text
+.botinv use <botName>
+.botinv target sellbatch <bag,slot;bag,slot;...> confirm
+.botinv target destroybatch <bag,slot;bag,slot;...> confirm
+```
+
+Bulk safety is intentionally stricter than the existing v8 single-item Danger mode:
+- quest items are always skipped
+- bags/containers are always skipped
+- Hearthstone and core Shaman totems are always skipped
+- items above `BotInventoryMaster.Bulk.MaxQuality` are always skipped (default: green/uncommon and below)
+- bulk vendor sell skips zero-price items rather than deleting them for zero copper
+- every removed stack is verified before it counts as success
+- bulk sell creates the same module buyback records used by selected-item selling
+
+The existing right-click shortcuts remain single-item actions, so deliberate one-off danger-mode control still works independently of bulk cleanup.

@@ -60,3 +60,19 @@ BotInventoryMaster.Danger.AllowAnyDestroy = 1
 # If 0, selected sell/destroy commands do not require the literal "confirm" word.
 # The addon still sends direct actions; no popup warnings.
 BotInventoryMaster.Danger.RequireConfirm = 0
+
+
+#
+# Bulk cleanup guardrails
+#
+# Multi-select sell/delete is intentionally safer than single-item Danger mode.
+# 0=poor/gray, 1=common/white, 2=uncommon/green, 3=rare/blue, 4=epic/purple.
+# Default 2 lets the addon bulk-clean gray/white/green clutter while protecting blue+ gear.
+BotInventoryMaster.Bulk.MaxQuality = 2
+
+# Hard cap per one chat command. The addon automatically chunks larger selections.
+# Keep <=24 so commands remain safely below the WoW 3.3.5 chat-length limit.
+BotInventoryMaster.Bulk.MaxItemsPerCommand = 24
+
+# Bulk actions always protect quest items, bags/containers, Hearthstone, and Shaman totems even
+# when Danger.AllowAnySell/Destroy is enabled. Single-item danger actions remain unchanged.
