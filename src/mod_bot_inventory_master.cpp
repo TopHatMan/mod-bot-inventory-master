@@ -867,10 +867,34 @@ namespace BotInventoryMaster
         return true;
     }
 
+    static bool IsValidBulkBagPosition(Player* target, BagSlotRef const& ref)
+    {
+        if (!target)
+            return false;
+
+        // Backpack storage slots only. Explicitly reject equipment, bank, keyring, buyback, etc.
+        if (ref.Bag == INVENTORY_SLOT_BAG_0)
+            return ref.Slot >= INVENTORY_SLOT_ITEM_START && ref.Slot < INVENTORY_SLOT_ITEM_END;
+
+        // Contents of equipped inventory bags only. The bag item itself is never a bulk target.
+        if (ref.Bag >= INVENTORY_SLOT_BAG_START && ref.Bag < INVENTORY_SLOT_BAG_END)
+        {
+            Bag* bag = target->GetBagByPos(ref.Bag);
+            return bag && ref.Slot < bag->GetBagSize();
+        }
+
+        return false;
+    }
+
     static void RemoveBulkItem(Player* target, BagSlotRef const& ref, bool selling, BulkCleanupStats& stats)
     {
         if (!target)
             return;
+        if (!IsValidBulkBagPosition(target, ref))
+        {
+            ++stats.SkippedStacks;
+            return;
+        }
 
         Item* item = target->GetItemByPos(ref.Bag, ref.Slot);
         if (!item)
