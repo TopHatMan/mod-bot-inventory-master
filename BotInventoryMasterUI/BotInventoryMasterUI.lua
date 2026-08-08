@@ -247,7 +247,10 @@ local function SendSelectedBulk(action)
 end
 
 sellCheckedButton:SetScript("OnClick", function() SendSelectedBulk("sell") end)
-destroyCheckedButton:SetScript("OnClick", function() SendSelectedBulk("destroy") end)
+destroyCheckedButton:SetScript("OnClick", function()
+    if SelectionCount() > 0 then StaticPopup_Show("BOTINV_BULK_DESTROY_CONFIRM")
+    else UpdateSelectionStatus("nothing selected") end
+end)
 
 sortButton = MakeButton(f, "Sort: Best", 24, -112, 82, 22, function(self)
     sortMode = sortMode == "best" and "trash" or "best"
@@ -289,6 +292,16 @@ local function AddBotButton(name, manageable)
     b:Show()
 end
 
+
+StaticPopupDialogs["BOTINV_BULK_DESTROY_CONFIRM"] = {
+    text = "Delete all currently checked bulk-safe stacks? Quest items, bags, key utilities, class tools, and items above the server quality limit are protected.",
+    button1 = "Delete Checked",
+    button2 = "Cancel",
+    OnAccept = function() SendSelectedBulk("destroy") end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+}
 
 StaticPopupDialogs["BOTINV_DESTROY_CONFIRM"] = {
     text = "Destroy the selected gray item from the bot's bag?",

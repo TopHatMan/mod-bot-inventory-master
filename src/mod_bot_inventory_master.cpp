@@ -785,6 +785,21 @@ namespace BotInventoryMaster
             reason = "hard-protected utility item";
             return true;
         }
+        if (proto->HasFlag(ITEM_FLAG_NO_USER_DESTROY))
+        {
+            reason = "item cannot normally be destroyed by a player";
+            return true;
+        }
+        if ((proto->BagFamily & BAG_FAMILY_MASK_KEYS) || (proto->BagFamily & BAG_FAMILY_MASK_QUEST_ITEMS))
+        {
+            reason = "key/quest-family utility item";
+            return true;
+        }
+        if (proto->TotemCategory != 0)
+        {
+            reason = "class/profession tool or totem-category item";
+            return true;
+        }
         if (uint32(proto->Quality) > g_bulkMaxQuality)
         {
             reason = "quality above bulk cleanup limit";

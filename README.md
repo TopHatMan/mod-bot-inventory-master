@@ -251,3 +251,5 @@ Server protocol/commands:
 .botinv party sellbatch <BotName,bag,slot;...> confirm [refresh]
 .botinv party destroybatch <BotName,bag,slot;...> confirm [refresh]
 ```
+
+Bulk cleanup also refuses items flagged `ITEM_FLAG_NO_USER_DESTROY`, key/quest bag-family items, and items with a non-zero `TotemCategory` (class/profession tools). `Delete Checked` asks for one confirmation before dispatching the selected batches.
