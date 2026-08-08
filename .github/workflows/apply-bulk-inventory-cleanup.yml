@@ -1,6 +1,7 @@
 name: Apply bulk inventory cleanup patch
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - agent/bulk-inventory-cleanup
