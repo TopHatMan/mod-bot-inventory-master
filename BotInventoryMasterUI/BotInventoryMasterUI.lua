@@ -409,8 +409,8 @@ local function SelectBagButton(btn, toggleBulk)
         end
     end
     for _, other in ipairs(bagButtons) do
-        if other.bag and other.slot then
-            other:SetChecked(selectedItems[tostring(other.bag) .. "," .. tostring(other.slot)] and true or false)
+        if other.item then
+            other:SetChecked(selectedItems[ItemKey(other.item)] and true or false)
         end
     end
     UpdateSelectionStatus((btn.itemName or "item") .. " @ " .. tostring(selectedBag) .. "/" .. tostring(selectedSlot))
@@ -612,6 +612,7 @@ local function OnProtocol(msg)
     if p[2] == "BAG" and p[3] == "BEGIN" then
         partyView = false
         ClearBagGrid()
+        equipLabel:SetText("Equipment")
         lastBotName = p[4] or "?"
         lastBotFreeSlots = tonumber(p[5]) or 0
         lastBotMoneyCopper = tonumber(p[6]) or 0
@@ -651,6 +652,8 @@ local function OnProtocol(msg)
     if p[2] == "PBAG" and p[3] == "BEGIN" then
         partyView = true
         ClearBagGrid()
+        ClearEquip()
+        equipLabel:SetText("Equipment (click a bot)")
         lastBotName = "Party"
         lastBotFreeSlots = 0
         lastBotMoneyCopper = 0
