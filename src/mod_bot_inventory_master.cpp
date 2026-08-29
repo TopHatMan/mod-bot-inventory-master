@@ -413,6 +413,26 @@ namespace BotInventoryMaster
         return g_gmBypass && manager->GetSession()->GetSecurity() > SEC_PLAYER;
     }
 
+    static bool IsRandomBotAccount(WorldSession const* session)
+    {
+        if (!session)
+            return false;
+
+        std::string prefix = sConfigMgr->GetOption<std::string>("AiPlayerbot.RandomBotAccountPrefix", "rndbot");
+        if (prefix.empty())
+            return false;
+
+        QueryResult result = LoginDatabase.Query("SELECT username FROM account WHERE id = {} LIMIT 1",
+            session->GetAccountId());
+        if (!result)
+            return false;
+
+        std::string username = result->Fetch()[0].Get<std::string>();
+        std::transform(prefix.begin(), prefix.end(), prefix.begin(), [](unsigned char c) { return std::tolower(c); });
+        std::transform(username.begin(), username.end(), username.begin(), [](unsigned char c) { return std::tolower(c); });
+        return username.rfind(prefix, 0) == 0;
+    }
+
     static bool CanManageTarget(Player* manager, Player* target, std::string& reason)
     {
         reason.clear();
@@ -444,6 +464,12 @@ namespace BotInventoryMaster
         }
 
         if (HasGmBypass(manager))
+            return true;
+
+        // Only characters on the configured random-bot account namespace are
+        // public NPCs. Player-owned altbots may have bot sessions too, so the
+        // session's IsBot flag is intentionally not an authorization boundary.
+        if (IsRandomBotAccount(targetSession))
             return true;
 
         uint32 const managerAccount = managerSession->GetAccountId();
