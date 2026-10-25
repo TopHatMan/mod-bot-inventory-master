@@ -457,7 +457,7 @@ namespace BotInventoryMaster
             return false;
         }
 
-        if (g_requireTargetIsBot && !targetSession->IsBot())
+        if (g_requireTargetIsBot && !targetSession->IsHeadless())
         {
             reason = "Target is not a playerbot session.";
             return false;
